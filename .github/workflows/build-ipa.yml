@@ -47,7 +47,19 @@ jobs:
 
       - name: 安装构建依赖
         run: |
-          brew install meson ninja pkg-config nasm protobuf 2>&1 | tail -15
+          brew install meson ninja pkg-config nasm fmt googletest 2>&1 | tail -15
+
+      - name: 安装 protoc 28.3（adb-mobile 要求精确版本，不是随便一个 protoc）
+        run: |
+          # adb-mobile 的 check-protobuf-version 会拿 `protoc --version` 去 grep porting/protobuf.rb，
+          # 版本对不上直接退出。必须装 28.3。
+          curl -fL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-osx-aarch_64.zip
+          unzip -oq /tmp/protoc.zip -d "$HOME/protoc28"
+          echo "$HOME/protoc28/bin" >> $GITHUB_PATH
+          # 保证不会被别的 protoc 抢先
+          brew unlink protobuf 2>/dev/null || true
+          "$HOME/protoc28/bin/protoc" --version
 
       - name: 准备 JDK 17
         run: |
