@@ -96,9 +96,15 @@ jobs:
           TAP="$(brew --repository)/Library/Taps/local/homebrew-protobuf/Formula"
           mkdir -p "$TAP"
           cp external/adb-mobile/porting/protobuf.rb "$TAP/protobuf.rb"
-          brew install local/protobuf/protobuf
+          # ★ 必须 --ignore-dependencies：
+          #   formula 里有 depends_on "abseil"，而 brew 会去装**当前**的 abseil
+          #   （20260817.0），把我们上一步刚编好的 20240722 连头文件一起覆盖掉，
+          #   于是 adb 又编不过了。protobuf 是预编译 bottle，本来也不需要 brew 帮它配依赖。
+          brew install --ignore-dependencies local/protobuf/protobuf
           echo "--- 验证 ---"
           protoc --version
+          echo "--- 确认 abseil 还是 20240722（应能列出 2407.0.0 的库）---"
+          ls "$(brew --prefix)/lib"/libabsl_die_if_null* | head -3
 
       - name: 绕过 adb-mobile 的 protobuf 版本检查
         run: |
