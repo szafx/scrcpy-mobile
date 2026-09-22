@@ -80,6 +80,11 @@ jobs:
 
       - name: 构建 porting 库
         working-directory: porting
+        env:
+          # CMake 4.x 移除了对 cmake_minimum_required(VERSION <3.5) 的兼容，
+          # 而 adb-mobile 依赖的 lz4 等老库还用着老写法，直接 configure 失败。
+          # 这是官方给的逃生阀。
+          CMAKE_POLICY_VERSION_MINIMUM: '3.5'
         run: |
           set -e
           echo "===== [1/6] adb-mobile ====="
