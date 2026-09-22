@@ -64,17 +64,40 @@ jobs:
           # 让 brew 那个别抢
           brew unlink cmake 2>/dev/null || true
           "$CMBIN/cmake" --version
-      - name: 准备 protobuf（用 brew 当前版）
+      - name: 把 abseil 换成 20240722（adb 的 LOG(VERBOSE) 需要它）
         run: |
-          # 为什么不再强求 28.3：
-          #   adb-mobile 的 check-protobuf-version 要求精确 28.3，但三条路都试过、都不通：
-          #     a) 装 28.3 的 release zip —— 里面只有 bin/ 和 include/，没有 lib/
-          #     b) 装作者 formula 的 bottle —— 2024 年编的，链 abseil 2407.0.0，
-          #        而 brew 现在给的是 20260817.0，protoc 一跑就 dyld abort
-          #     c) 源码编 28.3 + 自带 abseil —— release tarball 里 third_party/abseil-cpp 是空的
-          #   adb-mobile 是「构建时用 protoc 生成 C++」的，生成器与运行时同源即可自洽，
-          #   不需要钉死版本。所以用 brew 当前的，把那条检查绕过去（下一步）。
-          brew install protobuf
+          # ★ 这是整条链最关键的版本约束，前面几条弯路都是因为它：
+          #   adb 的源码用 LOG(VERBOSE)，展开成 ABSL_LOG_INTERNAL_LOG_VERBOSE —— 这个宏
+          #   在新版 abseil 里被删了。用 brew 当前的 abseil 会直接编译失败：
+          #     error: use of undeclared identifier 'ABSL_LOG_INTERNAL_LOG_VERBOSE'
+          #   所以必须用 20240722（= abseil 2407.0.0），也就是作者当时配套的那版。
+          #   换上它之后，作者 protobuf.rb 里 28.3 的预编译 bottle 也能正常用了
+          #   —— 那个 bottle 正是链的 2407.0.0，前面单独装会 dyld 报错。
+          brew uninstall --ignore-dependencies abseil 2>/dev/null || true
+          curl -fL -o /tmp/absl.tar.gz \
+            https://github.com/abseil/abseil-cpp/releases/download/20240722.0/abseil-cpp-20240722.0.tar.gz
+          tar xzf /tmp/absl.tar.gz -C /tmp
+          cd /tmp/abseil-cpp-20240722.0
+          cmake -S . -B build \
+            -DCMAKE_INSTALL_PREFIX="$(brew --prefix)" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DABSL_PROPAGATE_CXX_STD=ON \
+            -DABSL_BUILD_TESTING=OFF \
+            -DABSL_ENABLE_INSTALL=ON
+          cmake --build build -j "$(sysctl -n hw.ncpu)"
+          cmake --install build
+          echo "--- 验证 ---"
+          ls "$(brew --prefix)/lib"/libabsl_die_if_null* 2>/dev/null | head -3
+
+      - name: 安装 protobuf 28.3（用作者的 formula，现在 abseil 版本对得上了）
+        run: |
+          TAP="$(brew --repository)/Library/Taps/local/homebrew-protobuf/Formula"
+          mkdir -p "$TAP"
+          cp external/adb-mobile/porting/protobuf.rb "$TAP/protobuf.rb"
+          brew install local/protobuf/protobuf
+          echo "--- 验证 ---"
           protoc --version
 
       - name: 绕过 adb-mobile 的 protobuf 版本检查
