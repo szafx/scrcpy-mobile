@@ -1,241 +1,208 @@
 name: Build unsigned IPA
 
-# 不签名 IPA，用 Sideloadly 重签后装进手机。
+# 不签名 IPA，用 Sideloadly / TrollStore 装进手机。
 #
-# 三个上游坑（已在这份 workflow 里绕过）：
-#   1. porting/Makefile 的 all 目标里有个悬空的 `ish`（无规则）→ 不能直接 make libs，要逐个目标调
-#   2. external/adb-mobile 需要 protoc → brew install protobuf
-#   3. porting/libtsnet 上游漏了 go.mod（只有 go.sum）→ 现场 go mod init
-#      而 Xcode 链接要靠它产出 libtsnet-forwarder.a（make libs 不含这一步）
+# ★ 这份 workflow 是照着一份**已经跑通 20+ 次**的配方改的：
+#   https://github.com/haha1314521/scrcpy-mobile/blob/main/.github/workflows/build-ipa.yml
+#   （它构建的就是当前的 scrcpy-app，8~9 分钟出 32MB IPA，用 macos-15 + Xcode 16.4）
+#   加了我们自己的 libfrp（内嵌 frp visitor）。
+#
+# 之前走过的一大堆弯路，都别再走：
+#   ✗ 换 macos-14 + Xcode 15.4 —— 工程是 objectVersion 77（Xcode 16 格式，
+#     有 PBXFileSystemSynchronizedRootGroup），Xcode 15 根本打不开；而且小组件
+#     部署目标是 18.2，要 iOS 18 SDK
+#   ✗ 用 brew 装 protobuf 28.3 / 自己编 abseil 20240722 —— adb-mobile **自带
+#     protobuf 子模块**（含 abseil），-Dprotobuf_ABSL_PROVIDER=module 直接编就行
+#   ✗ 挪 brew 的 openssl 头 —— 那条路没走到过，实测真实失败点是 libs/ 子目录没建
+#   ✗ 给 make-adb.sh 打 sed 补丁 —— 路径本身就是错的（脚本在 porting/scripts/ 下）
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
 
+env:
+  # CMake 4.x 对 lz4/zstd 这些老库兼容性差，官方逃生阀
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
 jobs:
   build:
-    # macos-14 上才有 Xcode 15.x。用 Xcode 16 编 adb-mobile 里 vendored 的
-    # BoringSSL 会报一堆 "use of undeclared identifier 'bssl'"（老 BoringSSL 与新 clang
-    # 不兼容），所以钉在 15.4。
-    runs-on: macos-14
-    timeout-minutes: 180
+    runs-on: macos-15          # 默认 Xcode 16.4，正好够这个工程
+    timeout-minutes: 300       # FFmpeg 要编 3 个 ABI，留足余量
 
     steps:
       - name: 检出代码（含全部 submodule）
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
 
-      - name: 选用 Xcode 15.4
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: '15.4'
-
-      - name: 准备 Go（libtsnet 要用）
+      - name: 准备 Go（libtsnet / libfrp 要用）
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: 'stable'
+          cache-dependency-path: porting/libtsnet/go.sum
 
-      - name: 显示环境信息
+      - name: 安装构建工具
         run: |
-          echo "=== macOS ==="; sw_vers
-          echo "=== Xcode ==="; xcodebuild -version
-          echo "=== iOS SDK ==="; xcrun --sdk iphoneos --show-sdk-version
-          echo "=== Go ==="; go version
-          echo "=== 构建工具 ==="
-          for t in cmake ninja meson pkg-config nasm protoc; do
-            printf '%-12s ' "$t"; command -v $t || echo '(缺)'
+          brew install meson ninja nasm ffmpeg sdl2 fmt lz4 brotli zstd googletest
+          # ★ gas-preprocessor.pl：FFmpeg 编 arm64 时 configure 会 check_gas，
+          #   runner 上不自带，缺了就直接 die:
+          #     "GNU assembler not found, install/update gas-preprocessor"
+          curl -fsSL -o /opt/homebrew/bin/gas-preprocessor.pl \
+            https://raw.githubusercontent.com/FFmpeg/gas-preprocessor/master/gas-preprocessor.pl
+          chmod +x /opt/homebrew/bin/gas-preprocessor.pl
+          echo "=== 环境 ==="
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          for t in cmake meson ninja nasm protoc gas-preprocessor.pl go; do
+            printf '%-22s ' "$t"; command -v "$t" || echo '(缺)'
           done
-          echo "=== Android SDK（scrcpy-server 要用）==="
-          ls -d "$HOME/Library/Android/sdk" 2>/dev/null && echo "  ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          echo "=== JDK ==="
-          /usr/libexec/java_home -V 2>&1 | head -6 || true
 
-      - name: 安装构建依赖
-        run: |
-          brew install meson ninja pkg-config nasm fmt googletest 2>&1 | tail -15
+      - name: 拉子模块的 tag（脚本里要按 tag 检出）
+        run: git submodule foreach --recursive 'git fetch --tags --force --prune || true'
 
-      - name: 换用 CMake 3.31（CMake 4 对 zstd/lz4 这些老库兼容性太差）
+      - name: 缓存 porting 产物
+        id: libcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            porting/libs
+            scrcpy/x
+          key: porting-libs-v3-${{ hashFiles('porting/Makefile', 'porting/scripts/**', 'porting/cmake/**', '.gitmodules') }}
+
+      # ★★ 这步是之前真正卡住的原因：
+      #   上游 porting/Makefile 的 mkdir-output 只建了 libs，没建子目录，
+      #   于是 make adb-mobile 编完之后那一下 cp 直接失败：
+      #     cp: ./libs/iphoneos/arm64: No such file or directory
+      #   （所有编译其实都成功了，死在拷文件）
+      - name: 预建 libs 子目录
         run: |
-          # runner 自带的是 CMake 4.x，它在 configure 老项目时直接报错：
-          #   - cmake_minimum_required(VERSION <3.5) 被移除兼容 → 设 CMAKE_POLICY_VERSION_MINIMUM 能顶一阵
-          #   - 但 zstd 的 programs/CMakeLists.txt:40 (install) 还是会错，那个逃生阀管不了
-          # 索性换成 3.31 系（官方 universal 包，不用 brew，避免版本漂移）
-          curl -fL -o /tmp/cmake.tgz \
-            https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz
-          tar xzf /tmp/cmake.tgz -C "$HOME"
-          CMBIN="$HOME/cmake-3.31.6-macos-universal/CMake.app/Contents/bin"
-          ls "$CMBIN" | head
-          echo "$CMBIN" >> $GITHUB_PATH
-          # 让 brew 那个别抢
-          brew unlink cmake 2>/dev/null || true
-          "$CMBIN/cmake" --version
-      - name: 把 abseil 换成 20240722（adb 的 LOG(VERBOSE) 需要它）
+          mkdir -p porting/libs/iphoneos/arm64
+          mkdir -p porting/libs/iphonesimulator/arm64
+          mkdir -p porting/libs/iphonesimulator/x86_64
+          mkdir -p porting/libs/include
+
+      - name: 编译 host 版 protobuf 28.3（用 adb-mobile 自带的子模块）
+        if: steps.libcache.outputs.cache-hit != 'true'
         run: |
-          # ★ 这是整条链最关键的版本约束，前面几条弯路都是因为它：
-          #   adb 的源码用 LOG(VERBOSE)，展开成 ABSL_LOG_INTERNAL_LOG_VERBOSE —— 这个宏
-          #   在新版 abseil 里被删了。用 brew 当前的 abseil 会直接编译失败：
-          #     error: use of undeclared identifier 'ABSL_LOG_INTERNAL_LOG_VERBOSE'
-          #   所以必须用 20240722（= abseil 2407.0.0），也就是作者当时配套的那版。
-          #   换上它之后，作者 protobuf.rb 里 28.3 的预编译 bottle 也能正常用了
-          #   —— 那个 bottle 正是链的 2407.0.0，前面单独装会 dyld 报错。
-          brew uninstall --ignore-dependencies abseil 2>/dev/null || true
-          curl -fL -o /tmp/absl.tar.gz \
-            https://github.com/abseil/abseil-cpp/releases/download/20240722.0/abseil-cpp-20240722.0.tar.gz
-          tar xzf /tmp/absl.tar.gz -C /tmp
-          cd /tmp/abseil-cpp-20240722.0
-          # ★ 装到 /opt/homebrew/opt/abseil —— 不是随便找个地方：
-          #   作者那个 protobuf bottle 里的 protoc 把依赖写死成
-          #     /opt/homebrew/opt/abseil/lib/libabsl_*.2407.0.0.dylib
-          #   而 /opt/homebrew/opt/abseil 是 brew 的符号链接。装到别处 protoc 找不到。
-          PREFIX="$(brew --prefix)/opt/abseil"
-          rm -rf "$PREFIX"
-          cmake -S . -B build \
-            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+          # adb-mobile 的 external/protobuf 子模块**自带 abseil**，
+          # 所以 -Dprotobuf_ABSL_PROVIDER=module 能直接用，完全不碰 brew 的 abseil。
+          # （用 release tarball 就不行 —— 那个里 third_party/abseil-cpp 是空的）
+          cd external/adb-mobile/external/protobuf
+          git fetch --tags --force
+          git checkout v28.3
+          git submodule update --init --recursive
+          # absl 在 arm64 mac 上会误判架构、塞进 x86 专用编译选项，去掉
+          find third_party/abseil-cpp/absl/copts -name '*.cmake' \
+            -exec sed -i '' 's/-msse4\.1//g; s/-maes//g' {} +
+          cmake -S . -B out-host \
             -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON \
-            -DCMAKE_CXX_STANDARD=17 \
-            -DABSL_PROPAGATE_CXX_STD=ON \
-            -DABSL_BUILD_TESTING=OFF \
-            -DABSL_ENABLE_INSTALL=ON
-          cmake --build build -j "$(sysctl -n hw.ncpu)"
-          cmake --install build
-          # 让编译器（/opt/homebrew/include）和链接器（/opt/homebrew/lib）也能看到
-          BREW="$(brew --prefix)"
-          rm -rf "$BREW/include/absl"
-          ln -s "$PREFIX/include/absl" "$BREW/include/absl"
-          for f in "$PREFIX"/lib/libabsl_*.dylib; do
-            ln -sf "$f" "$BREW/lib/$(basename "$f")"
-          done
-          echo "--- 验证：2407.0.0 的库在位 ---"
-          ls "$PREFIX/lib"/libabsl_die_if_null* | head -3
+            -Dprotobuf_BUILD_TESTS=OFF \
+            -Dprotobuf_ABSL_PROVIDER=module \
+            -Dprotobuf_BUILD_SHARED_LIBS=OFF \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DCMAKE_CXX_STANDARD=17
+          cmake --build out-host -j 8
+          sudo cmake --install out-host
+          protoc --version      # 必须是 28.3（adb-mobile 的版本检查会校验）
 
-      - name: 安装 protobuf 28.3（用作者的 formula，现在 abseil 版本对得上了）
+      - name: 造一个 zstd 程序的空壳（iOS 交叉编译不该编 zstd 命令行工具）
+        if: steps.libcache.outputs.cache-hit != 'true'
         run: |
-          TAP="$(brew --repository)/Library/Taps/local/homebrew-protobuf/Formula"
-          mkdir -p "$TAP"
-          cp external/adb-mobile/porting/protobuf.rb "$TAP/protobuf.rb"
-          # ★ 必须 --ignore-dependencies：
-          #   formula 里有 depends_on "abseil"，而 brew 会去装**当前**的 abseil
-          #   （20260817.0），把我们上一步刚编好的 20240722 连头文件一起覆盖掉，
-          #   于是 adb 又编不过了。protobuf 是预编译 bottle，本来也不需要 brew 帮它配依赖。
-          brew install --ignore-dependencies local/protobuf/protobuf
-          echo "--- 验证 ---"
-          protoc --version
-          echo "--- 确认 abseil 还是 20240722（应能列出 2407.0.0 的库）---"
-          ls "$(brew --prefix)/lib"/libabsl_die_if_null* | head -3
+          printf '# Stub for iOS cross build - do not build zstd command-line programs\n' \
+            > external/adb-mobile/porting/cmake/CMakeLists.zstd.txt
 
-      - name: 绕过 adb-mobile 的 protobuf 版本检查
-        run: |
-          M=external/adb-mobile/Makefile
-          cp "$M" "$M.bak"
-          sed -i '' 's/^all: check-protobuf-version libs/all: libs/' "$M"
-          sed -i '' 's/^check-protobuf-version:/check-protobuf-version-SKIPPED:/' "$M"
-          echo "--- 改后的前 12 行 ---"
-          head -12 "$M"
-
-      - name: 准备 JDK 17
-        run: |
-          brew install openjdk@17 2>&1 | tail -5
-          JDK="$(brew --prefix openjdk@17)"
-          echo "JAVA_HOME=$JDK" >> $GITHUB_ENV
-          echo "$JDK/bin" >> $GITHUB_PATH
-
-      - name: 修补 adb-mobile 的构建脚本（子模块重置改成强制）
-        run: |
-          S=external/adb-mobile/android-tools/scripts/make-adb.sh
-          if [ -f "$S" ]; then
-            echo "=== 原始脚本 ==="
-            cat -n "$S"
-            cp "$S" "$S.bak"
-            # 它构建时会给 vendor/adb 打补丁，之后再想 reset 就被本地改动挡住：
-            #   fatal: Unable to checkout '<sha>' in submodule path 'vendor/adb'
-            # 把 checkout / submodule update 都改成强制。
-            sed -i '' 's/git submodule update/git submodule update --force/g' "$S"
-            sed -i '' 's/git checkout /git checkout -f /g' "$S"
-            sed -i '' 's/git -C \(.*\) checkout /git -C \1 checkout -f /g' "$S"
-            echo "=== 修补后（含 checkout/submodule 的行）==="
-            grep -n 'checkout\|submodule' "$S" || true
-          else
-            echo "!! 没找到 $S，列出 scripts 目录："
-            ls -la external/adb-mobile/android-tools/scripts/ 2>/dev/null || true
-            ls -la external/adb-mobile/scripts/ 2>/dev/null || true
-          fi
-
-      - name: 构建 porting 库
-        working-directory: porting
+      - name: 编译 adb-mobile
+        if: steps.libcache.outputs.cache-hit != 'true'
         env:
-          # CMake 4.x 移除了对 cmake_minimum_required(VERSION <3.5) 的兼容，
-          # 而 adb-mobile 依赖的 lz4 等老库还用着老写法，直接 configure 失败。
-          # 这是官方给的逃生阀。
-          CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+          CFLAGS: -I/opt/homebrew/include
+          CXXFLAGS: -I/opt/homebrew/include
         run: |
-          set -e
-          # ★★ adb-mobile 里 vendored 了 BoringSSL，而 GitHub 的 macOS runner 自带
-          #    brew 的 openssl@3（头文件在 /opt/homebrew/include/openssl）。
-          #    那个路径会抢在 vendored BoringSSL 前面被 include，两套头文件混用直接炸：
-          #      error: typedef redefinition with different types
-          #        ('struct crypto_threadid_st' vs 'int')   CRYPTO_THREADID
-          #      error: use of undeclared identifier 'bssl'
-          #    所以必须先把它挪开。（跟 Xcode 版本无关，换 15.4 解决不了。）
-          brew uninstall --ignore-dependencies openssl@3 2>/dev/null || true
-          brew unlink openssl@3 2>/dev/null || true
-          mv /opt/homebrew/include/openssl /opt/homebrew/include/_openssl_disabled 2>/dev/null || true
-          ls /opt/homebrew/include/ | grep -i openssl || echo "  (openssl 头文件已挪开)"
-          echo "===== [1/7] adb-mobile ====="
-          make adb-mobile
-          echo "===== [2/6] SDL ====="
-          make libsdl
-          echo "===== [3/6] FFmpeg ====="
-          make ffmpeg
-          echo "===== [4/6] scrcpy ====="
-          make scrcpy
-          echo "===== [5/6] scrcpy-server ====="
-          make scrcpy-server
-          echo "===== [6/6] libtsnet（上游缺 go.mod，现场补）====="
-          cd libtsnet
-          if [ ! -f go.mod ]; then
-            go mod init me.wsen.scrcpy-tsnet
+          make -C porting adb-mobile
+          # 别被"没报错"骗了：验证真的编出了东西
+          if ! nm porting/libs/iphoneos/arm64/libadb-full.a 2>/dev/null | grep -q "T _adb_commandline_porting"; then
+            echo "::error::libadb-full.a 里没有 adb_commandline_porting —— adb 核心其实没编出来"
+            exit 1
           fi
+
+      - name: 编译 SDL3
+        if: steps.libcache.outputs.cache-hit != 'true'
+        run: make -C porting libsdl
+
+      - name: 编译 FFmpeg
+        if: steps.libcache.outputs.cache-hit != 'true'
+        run: make -C porting ffmpeg
+
+      # porting/src 不在缓存键里，所以 libscrcpy 每次都重编（约 5 分钟），保证移植层改动生效
+      - name: 编译 libscrcpy
+        run: make -C porting scrcpy
+
+      - name: 编译 OpenSSL
+        if: steps.libcache.outputs.cache-hit != 'true'
+        run: make -C porting openssl
+
+      - name: 编译 vncclient
+        if: steps.libcache.outputs.cache-hit != 'true'
+        run: make -C porting vncclient
+
+      # 上游 libtsnet 只提交了 go.sum、没提交 go.mod，现场补一个（模块名要和源码里的 import 对上）
+      - name: 编译 libtsnet
+        if: steps.libcache.outputs.cache-hit != 'true'
+        run: |
+          cd porting/libtsnet
+          [ -f go.mod ] || go mod init me.wsen.scrcpy-tsnet
           go mod tidy
           cd ..
           make tsnet-forwarder
-          echo "===== [7/7] libfrp（内嵌给 App 的 frp visitor）====="
-          cd libfrp
+
+      # ★ 我们加的：内嵌 frp visitor（被控端 frpc XTCP 的配对端，打通走 P2P）
+      - name: 编译 libfrp
+        run: |
+          cd porting/libfrp
           go mod tidy
           make build-iphoneos-arm64
           cp -v build/iphoneos/arm64/libfrp-forwarder.a ../libs/iphoneos/arm64/
           cp -v build/iphoneos/arm64/libfrp-forwarder.h ../libs/include/
           cd ..
-          echo "===== 产物清单 ====="
-          ls -lh libs/iphoneos/arm64/ | head -40
+          echo "=== 产物清单 ==="
+          ls -lh libs/iphoneos/arm64/
+
+      - name: 清掉中间产物腾磁盘
+        run: rm -rf porting/build scrcpy/x
 
       - name: 编译 App（不签名）
+        working-directory: scrcpy-app
         run: |
           xcodebuild \
-            -project "scrcpy-app/Scrcpy Remote.xcodeproj" \
+            -project "Scrcpy Remote.xcodeproj" \
             -scheme "Scrcpy Remote" \
             -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/DerivedData \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY= \
             build
 
       - name: 打包成 IPA
         run: |
+          set -x
+          APP_PATH=$(find scrcpy-app/build/DerivedData/Build/Products -maxdepth 2 -name "*.app" -type d | grep -i iphoneos | head -1)
+          echo "找到 app: $APP_PATH"
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_PATH/Info.plist" || echo "unknown")
           mkdir -p out/Payload
-          cp -R build/Build/Products/Release-iphoneos/*.app out/Payload/
-          cd out && zip -qry ../ScrcpyRemote-unsigned.ipa Payload
-          ls -lh ../ScrcpyRemote-unsigned.ipa
-          echo "--- Payload ---"; ls Payload/
+          cp -R "$APP_PATH" out/Payload/
+          cd out
+          zip -qry "ScrcpyRemote-unsigned.ipa" Payload
+          ls -lh *.ipa
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: ScrcpyRemote-unsigned-ipa
-          path: ScrcpyRemote-unsigned.ipa
+          path: out/*.ipa
+          if-no-files-found: error
           retention-days: 14
