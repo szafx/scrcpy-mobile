@@ -152,7 +152,18 @@ jobs:
           CMAKE_POLICY_VERSION_MINIMUM: '3.5'
         run: |
           set -e
-          echo "===== [1/6] adb-mobile ====="
+          # ★★ adb-mobile 里 vendored 了 BoringSSL，而 GitHub 的 macOS runner 自带
+          #    brew 的 openssl@3（头文件在 /opt/homebrew/include/openssl）。
+          #    那个路径会抢在 vendored BoringSSL 前面被 include，两套头文件混用直接炸：
+          #      error: typedef redefinition with different types
+          #        ('struct crypto_threadid_st' vs 'int')   CRYPTO_THREADID
+          #      error: use of undeclared identifier 'bssl'
+          #    所以必须先把它挪开。（跟 Xcode 版本无关，换 15.4 解决不了。）
+          brew uninstall --ignore-dependencies openssl@3 2>/dev/null || true
+          brew unlink openssl@3 2>/dev/null || true
+          mv /opt/homebrew/include/openssl /opt/homebrew/include/_openssl_disabled 2>/dev/null || true
+          ls /opt/homebrew/include/ | grep -i openssl || echo "  (openssl 头文件已挪开)"
+          echo "===== [1/7] adb-mobile ====="
           make adb-mobile
           echo "===== [2/6] SDL ====="
           make libsdl
