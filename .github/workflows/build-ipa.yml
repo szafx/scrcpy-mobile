@@ -15,7 +15,10 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    # macos-14 上才有 Xcode 15.x。用 Xcode 16 编 adb-mobile 里 vendored 的
+    # BoringSSL 会报一堆 "use of undeclared identifier 'bssl'"（老 BoringSSL 与新 clang
+    # 不兼容），所以钉在 15.4。
+    runs-on: macos-14
     timeout-minutes: 180
 
     steps:
@@ -24,6 +27,11 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+
+      - name: 选用 Xcode 15.4
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '15.4'
 
       - name: 准备 Go（libtsnet 要用）
         uses: actions/setup-go@v5
