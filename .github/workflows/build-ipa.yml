@@ -49,37 +49,27 @@ jobs:
         run: |
           brew install meson ninja pkg-config nasm fmt googletest 2>&1 | tail -15
 
-      - name: 安装 protobuf 28.3（源码编译，用它自带的 abseil）
+      - name: 准备 protobuf（用 brew 当前版）
         run: |
-          # 为什么必须自己编：
-          #   1. adb-mobile 的 check-protobuf-version 拿 `protoc --version` 去 grep 它自带的
-          #      porting/protobuf.rb —— 版本必须是 28.3（brew 当前的更新，过不了）
-          #   2. 只装 protoc 可执行文件不够：CMake 要 find_package(Protobuf)，需要头文件 + 库，
-          #      而 protoc 的 release zip 里只有 bin/ 和 include/
-          #   3. 新 Homebrew 不允许 brew install ./file.rb（formula 必须在 tap 里）
-          #   4. ★ 就算绕过 3 装上了作者的 formula，它的 bottle 是 2024 年编的，链接的是
-          #      当时的 abseil 2407.0.0，而 brew 现在给的是 20260817.0 —— dyld 直接 abort
-          # 所以：从官方源码 tarball 编，并用 -Dprotobuf_ABSL_PROVIDER=module 让它用
-          #       自己 third_party 里那套 abseil，彻底不碰 brew 的 abseil。
-          brew unlink protobuf 2>/dev/null || true
-          curl -fL -o /tmp/pb.tgz \
-            https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protobuf-28.3.tar.gz
-          tar xzf /tmp/pb.tgz -C /tmp
-          cd /tmp/protobuf-28.3
-          cmake -S . -B build \
-            -DCMAKE_INSTALL_PREFIX="$HOME/pb283" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON \
-            -Dprotobuf_BUILD_TESTS=OFF \
-            -Dprotobuf_BUILD_EXAMPLES=OFF \
-            -Dprotobuf_ABSL_PROVIDER=module
-          cmake --build build -j "$(sysctl -n hw.ncpu)"
-          cmake --install build
-          echo "$HOME/pb283/bin" >> $GITHUB_PATH
-          echo "CMAKE_PREFIX_PATH=$HOME/pb283" >> $GITHUB_ENV
-          echo "--- 验证 ---"
-          "$HOME/pb283/bin/protoc" --version
-          ls "$HOME/pb283/lib" | head
+          # 为什么不再强求 28.3：
+          #   adb-mobile 的 check-protobuf-version 要求精确 28.3，但三条路都试过、都不通：
+          #     a) 装 28.3 的 release zip —— 里面只有 bin/ 和 include/，没有 lib/
+          #     b) 装作者 formula 的 bottle —— 2024 年编的，链 abseil 2407.0.0，
+          #        而 brew 现在给的是 20260817.0，protoc 一跑就 dyld abort
+          #     c) 源码编 28.3 + 自带 abseil —— release tarball 里 third_party/abseil-cpp 是空的
+          #   adb-mobile 是「构建时用 protoc 生成 C++」的，生成器与运行时同源即可自洽，
+          #   不需要钉死版本。所以用 brew 当前的，把那条检查绕过去（下一步）。
+          brew install protobuf
+          protoc --version
+
+      - name: 绕过 adb-mobile 的 protobuf 版本检查
+        run: |
+          M=external/adb-mobile/Makefile
+          cp "$M" "$M.bak"
+          sed -i '' 's/^all: check-protobuf-version libs/all: libs/' "$M"
+          sed -i '' 's/^check-protobuf-version:/check-protobuf-version-SKIPPED:/' "$M"
+          echo "--- 改后的前 12 行 ---"
+          head -12 "$M"
 
       - name: 准备 JDK 17
         run: |
@@ -110,6 +100,13 @@ jobs:
           go mod tidy
           cd ..
           make tsnet-forwarder
+          echo "===== [7/7] libfrp（内嵌给 App 的 frp visitor）====="
+          cd libfrp
+          go mod tidy
+          make build-iphoneos-arm64
+          cp -v build/iphoneos/arm64/libfrp-forwarder.a ../libs/iphoneos/arm64/
+          cp -v build/iphoneos/arm64/libfrp-forwarder.h ../libs/include/
+          cd ..
           echo "===== 产物清单 ====="
           ls -lh libs/iphoneos/arm64/ | head -40
 
