@@ -49,17 +49,16 @@ jobs:
         run: |
           brew install meson ninja pkg-config nasm fmt googletest 2>&1 | tail -15
 
-      - name: 安装 protoc 28.3（adb-mobile 要求精确版本，不是随便一个 protoc）
+      - name: 安装 protobuf 28.3（用 adb-mobile 自带的 formula）
         run: |
-          # adb-mobile 的 check-protobuf-version 会拿 `protoc --version` 去 grep porting/protobuf.rb，
-          # 版本对不上直接退出。必须装 28.3。
-          curl -fL -o /tmp/protoc.zip \
-            https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-osx-aarch_64.zip
-          unzip -oq /tmp/protoc.zip -d "$HOME/protoc28"
-          echo "$HOME/protoc28/bin" >> $GITHUB_PATH
-          # 保证不会被别的 protoc 抢先
+          # 不能只装 protoc 可执行文件：adb-mobile 的 CMake 要 find_package(Protobuf)，
+          # 需要头文件 + 库，而且版本必须是 28.3（check-protobuf-version 会校验）。
+          # 这个 formula 是对应版本，macOS 15 有预编译 bottle，不用从源码编。
           brew unlink protobuf 2>/dev/null || true
-          "$HOME/protoc28/bin/protoc" --version
+          brew install ./external/adb-mobile/porting/protobuf.rb
+          echo "--- 验证 ---"
+          protoc --version
+          brew --prefix protobuf
 
       - name: 准备 JDK 17
         run: |
