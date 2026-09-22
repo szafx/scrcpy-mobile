@@ -18,3 +18,6 @@
 
 // Import Tailscale library
 #import "libtsnet-forwarder.h"
+
+// Import frp visitor library (XTCP P2P + relay fallback)
+#import "libfrp-forwarder.h"
