@@ -1,13 +1,12 @@
 name: Build unsigned IPA
 
-# 阶段一目标：不写任何新代码，先把「原样构建」在 CI 上跑通。
-# 产出一个不签名 IPA，用 Sideloadly 重签后装进手机（和 locus-china-fix 那套一样）。
+# 不签名 IPA，用 Sideloadly 重签后装进手机。
 #
-# 用法：
-#   1. 把 wsvn53/scrcpy-mobile fork 到自己的 GitHub 账号
-#   2. 把本文件放到 fork 的 .github/workflows/build-ipa.yml
-#   3. Actions 页面手动触发（或 push 到 main）
-#   4. 跑完在 Artifacts 里下载 ScrcpyRemote-unsigned.ipa
+# 三个上游坑（已在这份 workflow 里绕过）：
+#   1. porting/Makefile 的 all 目标里有个悬空的 `ish`（无规则）→ 不能直接 make libs，要逐个目标调
+#   2. external/adb-mobile 需要 protoc → brew install protobuf
+#   3. porting/libtsnet 上游漏了 go.mod（只有 go.sum）→ 现场 go mod init
+#      而 Xcode 链接要靠它产出 libtsnet-forwarder.a（make libs 不含这一步）
 
 on:
   workflow_dispatch:
@@ -17,7 +16,7 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 150
+    timeout-minutes: 180
 
     steps:
       - name: 检出代码（含全部 submodule）
@@ -26,23 +25,29 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: 准备 Go（libtsnet 要用）
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
       - name: 显示环境信息
         run: |
           echo "=== macOS ==="; sw_vers
           echo "=== Xcode ==="; xcodebuild -version
           echo "=== iOS SDK ==="; xcrun --sdk iphoneos --show-sdk-version
+          echo "=== Go ==="; go version
           echo "=== 构建工具 ==="
-          for t in cmake ninja meson pkg-config nasm python3; do
+          for t in cmake ninja meson pkg-config nasm protoc; do
             printf '%-12s ' "$t"; command -v $t || echo '(缺)'
           done
           echo "=== Android SDK（scrcpy-server 要用）==="
-          ls -d "$HOME/Library/Android/sdk" 2>/dev/null || echo "(无)"
+          ls -d "$HOME/Library/Android/sdk" 2>/dev/null && echo "  ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           echo "=== JDK ==="
           /usr/libexec/java_home -V 2>&1 | head -6 || true
 
       - name: 安装构建依赖
         run: |
-          brew install meson ninja pkg-config nasm 2>&1 | tail -15
+          brew install meson ninja pkg-config nasm protobuf 2>&1 | tail -15
 
       - name: 准备 JDK 17
         run: |
@@ -52,7 +57,29 @@ jobs:
           echo "$JDK/bin" >> $GITHUB_PATH
 
       - name: 构建 porting 库
-        run: make libs
+        working-directory: porting
+        run: |
+          set -e
+          echo "===== [1/6] adb-mobile ====="
+          make adb-mobile
+          echo "===== [2/6] SDL ====="
+          make libsdl
+          echo "===== [3/6] FFmpeg ====="
+          make ffmpeg
+          echo "===== [4/6] scrcpy ====="
+          make scrcpy
+          echo "===== [5/6] scrcpy-server ====="
+          make scrcpy-server
+          echo "===== [6/6] libtsnet（上游缺 go.mod，现场补）====="
+          cd libtsnet
+          if [ ! -f go.mod ]; then
+            go mod init me.wsen.scrcpy-tsnet
+          fi
+          go mod tidy
+          cd ..
+          make tsnet-forwarder
+          echo "===== 产物清单 ====="
+          ls -lh libs/iphoneos/arm64/ | head -40
 
       - name: 编译 App（不签名）
         run: |
