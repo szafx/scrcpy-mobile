@@ -64,6 +64,7 @@ jobs:
           # 让 brew 那个别抢
           brew unlink cmake 2>/dev/null || true
           "$CMBIN/cmake" --version
+      - name: 准备 protobuf（用 brew 当前版）
         run: |
           # 为什么不再强求 28.3：
           #   adb-mobile 的 check-protobuf-version 要求精确 28.3，但三条路都试过、都不通：
