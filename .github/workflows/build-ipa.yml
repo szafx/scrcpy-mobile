@@ -143,6 +143,27 @@ jobs:
           echo "JAVA_HOME=$JDK" >> $GITHUB_ENV
           echo "$JDK/bin" >> $GITHUB_PATH
 
+      - name: 修补 adb-mobile 的构建脚本（子模块重置改成强制）
+        run: |
+          S=external/adb-mobile/android-tools/scripts/make-adb.sh
+          if [ -f "$S" ]; then
+            echo "=== 原始脚本 ==="
+            cat -n "$S"
+            cp "$S" "$S.bak"
+            # 它构建时会给 vendor/adb 打补丁，之后再想 reset 就被本地改动挡住：
+            #   fatal: Unable to checkout '<sha>' in submodule path 'vendor/adb'
+            # 把 checkout / submodule update 都改成强制。
+            sed -i '' 's/git submodule update/git submodule update --force/g' "$S"
+            sed -i '' 's/git checkout /git checkout -f /g' "$S"
+            sed -i '' 's/git -C \(.*\) checkout /git -C \1 checkout -f /g' "$S"
+            echo "=== 修补后（含 checkout/submodule 的行）==="
+            grep -n 'checkout\|submodule' "$S" || true
+          else
+            echo "!! 没找到 $S，列出 scripts 目录："
+            ls -la external/adb-mobile/android-tools/scripts/ 2>/dev/null || true
+            ls -la external/adb-mobile/scripts/ 2>/dev/null || true
+          fi
+
       - name: 构建 porting 库
         working-directory: porting
         env:
