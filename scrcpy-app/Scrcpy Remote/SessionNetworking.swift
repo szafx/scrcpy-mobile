@@ -70,7 +70,48 @@ class SessionNetworking {
     // Status callback for UI updates (e.g., "Regenerating auth key...")
     var statusUpdateCallback: ((String) -> Void)?
 
-    private init() {}
+    private init() {
+        loadPersistedCaches()
+    }
+
+    // MARK: - 缓存持久化
+
+    /// ★ 为什么必须存盘：这两个缓存原本只在内存里，**App 一退就清空** ——
+    ///   于是每次重开 App 都要全量扫 253 个地址（1~2 秒），
+    ///   用户体感就是「每次以 WiFi 状态重进 App 都很慢，要等一会儿才能连上」。
+    ///
+    ///   存下来之后，重开 App 时先用上次的地址做一次 0.5 秒存活探测，
+    ///   通了直接连，**根本不用扫**。
+    ///
+    /// 注意：恢复出来的缓存**必须先验证再用**（见 findLanHost），
+    /// 所以这里不存时间戳 —— 地址有没有效，验证一次就知道，比看时间戳可靠。
+    private let rememberedHostsKey = "session_networking.remembered_lan_hosts"
+    private let scanCacheKey = "session_networking.lan_scan_cache"
+
+    private func loadPersistedCaches() {
+        let defaults = UserDefaults.standard
+
+        if let raw = defaults.dictionary(forKey: rememberedHostsKey) as? [String: String] {
+            for (key, value) in raw {
+                if let uuid = UUID(uuidString: key) {
+                    sessionLanHosts[uuid] = value
+                }
+            }
+            print("[LanDiscovery] 从磁盘恢复 \(sessionLanHosts.count) 条会话地址记忆")
+        }
+
+        if let hosts = defaults.stringArray(forKey: scanCacheKey), !hosts.isEmpty {
+            lanScanCache = hosts.map { LanDiscovery.Candidate(host: $0, port: 5555) }
+            print("[LanDiscovery] 从磁盘恢复 \(hosts.count) 个候选地址（待验证）：\(hosts)")
+        }
+    }
+
+    private func persistCaches() {
+        let defaults = UserDefaults.standard
+        defaults.set(sessionLanHosts.reduce(into: [String: String]()) { $0[$1.key.uuidString] = $1.value },
+                     forKey: rememberedHostsKey)
+        defaults.set(lanScanCache.map { $0.host }, forKey: scanCacheKey)
+    }
 
     // MARK: - Public Methods
 
@@ -496,14 +537,15 @@ class SessionNetworking {
     private func findLanHost(portText: String, session: ScrcpySessionModel) async -> String? {
         guard let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return nil }
 
-        // 先看缓存：对上次扫到的地址做一次**真实往返**验证，活的才留下。
+        // 先看缓存：对上次见过（或上次扫到）的地址做一次**真实往返**验证，活的才留下。
         //
-        // ★ 这里必须用「发字节等 EOF」而不是 NWConnection 的 ready 状态：
-        //   切网的瞬间（WiFi→蜂窝）WiFi 接口还没消失，NWConnection 可能仍然报 ready，
-        //   但那时的连接其实已经不通了 —— 实测就是被这个坑到，蜂窝下还拿着
-        //   局域网的缓存地址去连，白等一场。
+        // ★ 这里**不看时间戳** —— 缓存可能是从磁盘恢复出来的（App 刚重启，
+        //   时间戳是 nil）。地址本身有没有效，验证一下就知道，比看时间戳可靠。
+        //
+        // ★ 也不能用 NWConnection 的 ready 状态：切网瞬间（WiFi→蜂窝）WiFi 接口
+        //   还没消失，它可能仍报 ready，但包已经出不去了。
         var candidates: [LanDiscovery.Candidate] = []
-        if let scannedAt = lanScanAt, Date().timeIntervalSince(scannedAt) < lanScanTTL {
+        if !lanScanCache.isEmpty {
             candidates = await withTaskGroup(of: (LanDiscovery.Candidate, Bool).self) { group -> [LanDiscovery.Candidate] in
                 for candidate in lanScanCache {
                     group.addTask {
@@ -545,6 +587,7 @@ class SessionNetworking {
         if candidates.count == 1 {
             let host = candidates[0].host
             sessionLanHosts[session.id] = host
+            persistCaches()
             return host
         }
 
@@ -553,6 +596,7 @@ class SessionNetworking {
         let matched = await matchTargetDevice(candidates, session: session, port: port)
         if let matched {
             sessionLanHosts[session.id] = matched
+            persistCaches()
         }
         return matched
     }
@@ -641,6 +685,7 @@ class SessionNetworking {
         lanScanTask = nil
         lanScanCache = found
         lanScanAt = Date()
+        persistCaches()
         return found
     }
 
