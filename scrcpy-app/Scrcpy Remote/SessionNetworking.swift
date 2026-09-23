@@ -66,10 +66,14 @@ class SessionNetworking {
         //
         //   必须放在 frp / Tailscale **之前** —— 否则勾了隧道开关就永远走隧道，
         //   明明在家连着同一个 WiFi 也要绕出去，白白多几十毫秒。
+        if session.useFrp || session.useTailscale {
+            // 先告诉用户在扫局域网 —— 扫描要一两秒，不给提示会像卡住了
+            statusUpdateCallback?("正在扫描局域网，寻找可直连的设备…")
+        }
         if session.useFrp || session.useTailscale,
            let lanHost = await findLanHost(portText: originalPort, session: session) {
             print("[SessionNetworking] 局域网里发现目标 \(lanHost):\(originalPort) —— 直连，跳过隧道")
-            statusUpdateCallback?("Using LAN (direct)")
+            statusUpdateCallback?("已找到局域网设备，正在直连…")
             return NetworkConnectionInfo(
                 host: lanHost,
                 port: originalPort,
@@ -173,7 +177,7 @@ class SessionNetworking {
         // Check if auth key needs regeneration before connecting
         if manager.isAuthKeyExpired() {
             if manager.canAutoRegenerateAuthKey() {
-                statusUpdateCallback?("Auth key expired, regenerating...")
+                statusUpdateCallback?("Tailscale 授权已过期，正在重新获取…")
                 print("[SessionNetworking] Auth key expired, attempting auto-regeneration")
 
                 let regenerated = await withCheckedContinuation { continuation in
@@ -186,16 +190,16 @@ class SessionNetworking {
                 }
 
                 if regenerated {
-                    statusUpdateCallback?("Auth key regenerated successfully")
+                    statusUpdateCallback?("Tailscale 授权已刷新")
                     print("[SessionNetworking] Auth key regenerated successfully")
                 } else {
-                    statusUpdateCallback?("Failed to regenerate auth key")
+                    statusUpdateCallback?("Tailscale 授权刷新失败")
                     print("[SessionNetworking] Failed to regenerate auth key, connection may fail")
                     // Continue anyway - the old key might still work
                 }
             } else {
                 print("[SessionNetworking] Auth key expired but OAuth not configured for auto-regeneration")
-                statusUpdateCallback?("Auth key expired - configure OAuth for auto-renewal")
+                statusUpdateCallback?("Tailscale 授权已过期，请到设置里配置 OAuth 才能自动续期")
             }
         }
 
@@ -204,23 +208,23 @@ class SessionNetworking {
             print("[SessionNetworking] Tailscale configuration is invalid")
             let configStatus = manager.getConfigurationStatus()
             print("[SessionNetworking] Configuration status: \(configStatus)")
-            statusUpdateCallback?("Tailscale configuration invalid")
+            statusUpdateCallback?("Tailscale 配置无效，请到 设置 → Tailscale 里检查")
             return nil
         }
 
-        statusUpdateCallback?("Connecting to Tailscale...")
+        statusUpdateCallback?("正在连接 Tailscale…")
 
         // Ensure Tailscale is connected
         guard manager.ensureConnected() else {
             print("[SessionNetworking] Failed to ensure Tailscale connection")
             if let lastError = manager.getLastError() {
                 print("[SessionNetworking] Tailscale error: \(lastError)")
-                statusUpdateCallback?("Tailscale error: \(lastError)")
+                statusUpdateCallback?("Tailscale 出错：\(lastError)")
             }
             return nil
         }
 
-        statusUpdateCallback?("Waiting for Tailscale connection...")
+        statusUpdateCallback?("等待 Tailscale 连接…")
 
         // Wait for connection to be established
         let connected = await waitForTailscaleConnection(timeout: 30.0)
@@ -228,19 +232,19 @@ class SessionNetworking {
             print("[SessionNetworking] Tailscale connection timeout")
             if let lastError = manager.getLastError() {
                 print("[SessionNetworking] Tailscale error after timeout: \(lastError)")
-                statusUpdateCallback?("Connection timeout: \(lastError)")
+                statusUpdateCallback?("连接超时：\(lastError)")
             } else {
-                statusUpdateCallback?("Tailscale connection timeout")
+                statusUpdateCallback?("Tailscale 连接超时")
             }
             return nil
         }
 
-        statusUpdateCallback?("Setting up port forwarding...")
+        statusUpdateCallback?("正在设置 Tailscale 端口转发…")
 
         // Find available local port
         guard let localPort = findAvailablePort() else {
             print("[SessionNetworking] No available ports in range \(forwardPortMin)-\(forwardPortMax)")
-            statusUpdateCallback?("No available ports")
+            statusUpdateCallback?("没有可用的本地端口，请先释放一些")
             return nil
         }
 
@@ -258,7 +262,7 @@ class SessionNetworking {
             print("[SessionNetworking] Failed to start port forwarding: \(remoteHost):\(remotePort) -> 127.0.0.1:\(localPort)")
             if let lastError = manager.getLastError() {
                 print("[SessionNetworking] Port forwarding error: \(lastError)")
-                statusUpdateCallback?("Port forwarding failed: \(lastError)")
+                statusUpdateCallback?("端口转发失败：\(lastError)")
             }
             return nil
         }
@@ -267,7 +271,7 @@ class SessionNetworking {
         activeSessionForwards[sessionId] = (host: remoteHost, port: remotePort, localPort: localPort)
 
         print("[SessionNetworking] Started port forwarding: \(remoteHost):\(remotePort) -> 127.0.0.1:\(localPort)")
-        statusUpdateCallback?("Connected via Tailscale")
+        statusUpdateCallback?("Tailscale 已连通")
 
         return NetworkConnectionInfo(
             host: "127.0.0.1",
@@ -301,16 +305,16 @@ class SessionNetworking {
         if FrpTunnel.shared.isRunning(for: proxyName) {
             let reused = Int(FrpTunnel.shared.localPort)
             print("[SessionNetworking] 复用已有的 frp 隧道: 127.0.0.1:\(reused)")
-            statusUpdateCallback?("Reusing frp tunnel")
+            statusUpdateCallback?("复用已有隧道，正在连接…")
             return frpConnectionInfo(session: session, localPort: reused)
         }
 
-        statusUpdateCallback?("Setting up frp tunnel...")
+        statusUpdateCallback?("局域网不可用，正在建立 frp 隧道…")
 
         // 本机监听端口和 Tailscale 共用同一个池子，避免撞车
         guard let localPort = findAvailablePort() else {
             print("[SessionNetworking] No available ports in range \(forwardPortMin)-\(forwardPortMax)")
-            statusUpdateCallback?("No available ports")
+            statusUpdateCallback?("没有可用的本地端口，请先释放一些")
             return nil
         }
 
@@ -333,7 +337,7 @@ class SessionNetworking {
         ) else {
             let err = FrpTunnel.shared.lastErrorText
             print("[SessionNetworking] frp visitor 启动失败: \(err)")
-            statusUpdateCallback?("frp tunnel failed: \(err)")
+            statusUpdateCallback?("frp 隧道建立失败：\(err)")
             return nil
         }
 
@@ -341,16 +345,16 @@ class SessionNetworking {
 
         // ⚠️ frpc 起来 ≠ 隧道通了：visitor 的本机监听是异步建的，而且第一次
         //    连接还要现场打洞。不等一下直接 adb connect 会偶发 Connection refused。
-        statusUpdateCallback?("Waiting for frp tunnel...")
+        statusUpdateCallback?("隧道已建立，正在打通链路（P2P 打洞，不通会自动转中转）…")
         guard await waitForLocalPort(port, timeout: 15.0) else {
             print("[SessionNetworking] frp 本机端口 \(port) 一直没起来（\(FrpTunnel.shared.status)）")
-            statusUpdateCallback?("frp tunnel timeout")
+            statusUpdateCallback?("frp 隧道超时：打洞和中转都没能建立连接")
             _ = stopForwarding(for: session.id)
             return nil
         }
 
         print("[SessionNetworking] frp 隧道就绪: \(session.hostReal):\(session.port) -> 127.0.0.1:\(port)")
-        statusUpdateCallback?("Connected via frp")
+        statusUpdateCallback?("frp 隧道就绪")
         return frpConnectionInfo(session: session, localPort: Int(port))
     }
 
