@@ -154,16 +154,13 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     ///   而连接界面的显示条件里有 `connectionStatus != Disconnected` ——
     ///   于是界面不显示、卡在投屏页面上（用户实测：「切换就卡在投屏页面」）。
     @Published private(set) var isAutoReconnecting = false
-    /// 上次重连的时刻 —— 用来冷却。
+    /// 上次重连的时刻 —— 用来冷却，避免切网时连着抖几下、重连被触发多次。
     ///
-    /// ★ 为什么必须冷却：切网时 `pathUpdateHandler` 会**连着报好几次**
-    ///   （真机日志：`[pdp_ip0,en0]` → `[pdp_ip0]` → `[pdp_ip0]` …），
-    ///   每次都排一个重连任务；而一次重连要几十秒，期间的路径变化又触发新的 —
-    ///   结果就是「重连 → 失败 → 再重连」的死循环，日志里能清楚看到
-    ///   `Starting connection to session:` 反复出现。
+    /// 注意触发点已经收紧到「网络变化 → 断开」这一条路了（见 Disconnected 处理器），
+    /// 不会再有「失败后又重连」的循环，所以这个值不用设太大 ——
+    /// 设大了反而让用户觉得"切完网半天没反应"。
     private var lastReconnectAt: Date?
-    /// 重连冷却时间（秒）
-    private let reconnectCooldown: TimeInterval = 20
+    private let reconnectCooldown: TimeInterval = 5
     /// 网络切换常常连着抖几下（WiFi→无网→蜂窝），等一下让它稳定再动手。
     ///
     /// 但**别太长** —— 这段等待里画面是冻结的、菜单点什么都没反应，
@@ -273,33 +270,40 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     }
 
     private func handlePathChange(_ path: NWPath) {
-        // ★ 只有「当前真的连着」的时候，网络变化才值得自动重连。
-        //
-        //   之前的条件是「有会话 && 不是 Disconnected」，太宽了 —— 于是：
-        //     切网 → 连接断 → 重连（合理）
-        //     重连失败 → 回主页，状态变成 Connection Failed
-        //     网络又报一次变化 → 又满足条件 → 又重连 …
-        //   变成「失败 → 回主页 → 自动重连 → 又失败」的死循环
-        //   （用户实测：「连接失败回到主页之后自己又重连了」，只有手动点取消才停）。
-        //
-        //   现在的判据是「连接本来是好的」：一旦处于连接中/失败态，就不该再触发。
-        guard currentSession != nil,
-              connectionStatus == ScrcpyStatusConnected
-                || connectionStatus == ScrcpyStatusSDLWindowAppeared,
-              !isConnecting,
-              !isAutoReconnecting else { return }
-
         let interfaces = path.availableInterfaces.map { $0.name }.joined(separator: ",")
         print("[AutoReconnect] 网络路径变化：\(path.status == .satisfied ? "可用" : "不可用")，接口 [\(interfaces)]")
 
-        // 防抖：切网往往会连着抖几下（WiFi → 无网 → 蜂窝），等稳定了再判断
-        pendingReconnectCheck?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.verifyConnectionAndReconnectIfNeeded()
+        // ★★ 这里**只打标记，不做判断、不直接重连**。
+        //
+        //   为什么：实测**断开通知比路径变化先到** ——
+        //     1. 网络一变 → 底层连接立刻断 → 发 Disconnected 通知（先把状态改掉、会话清掉）
+        //     2. pathUpdateHandler 这时才到，此时 connectionStatus 已经是 Disconnected、
+        //        currentSession 也可能已经 nil 了
+        //   所以任何基于「当前状态」的判断（比如「必须 == Connected」）都会永远失效 ——
+        //   上一版就是这么改的，结果一次都不重连了。
+        //
+        //   正确做法：网络变化只负责**留个记号**，真正决定要不要重连的是
+        //   随后的 Disconnected 处理器 —— 那时它手里还有「刚才连着的会话」。
+        guard currentSession != nil || justDisconnectedFromNetwork else { return }
+        if path.status == .satisfied || !path.availableInterfaces.isEmpty {
+            justHadNetworkChange = true
+            justHadNetworkChangeAt = Date()
         }
-        pendingReconnectCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + reconnectDebounce, execute: work)
     }
+
+    /// 网络刚刚变化过（断开处理器据此决定要不要自动重连）。
+    private var justHadNetworkChange = false
+    private var justHadNetworkChangeAt: Date?
+    /// 网络变化的有效期 —— 太久之前的切换不该用来解释现在的断开。
+    private let networkChangeWindow: TimeInterval = 15
+
+    /// 网络变化是否还「新鲜」（在有效窗口内）。
+    private var hasRecentNetworkChange: Bool {
+        guard justHadNetworkChange, let at = justHadNetworkChangeAt else { return false }
+        return Date().timeIntervalSince(at) < networkChangeWindow
+    }
+
+    private var justDisconnectedFromNetwork = false
 
     /// 网络路径变了 → 直接重连。
     ///
@@ -451,20 +455,38 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 if let disconnectMessage = statusMessage, !disconnectMessage.isEmpty {
                     print("ℹ️ [SessionConnectionManager] Disconnect message: \(disconnectMessage)")
                 }
-                
+
+                // ★★ 决定要不要自动重连，**就在这一步**（而不是网络变化的回调里）。
+                //
+                //   为什么是这里：实测**断开通知比网络路径变化先到** ——
+                //   等到 pathUpdateHandler 触发时，状态已经变成 Disconnected、
+                //   会话也可能被清掉了，那时再想判断「刚才是不是连着」已经没依据。
+                //   而这个处理器手里正好有刚断掉的会话，是最好的判断时机。
+                //
+                //   判据是「最近刚发生过网络变化」：网络切换导致的断开才值得重连；
+                //   用户手动断开、或者连接本来就失败，都不该自动重连
+                //   （否则就是「失败 → 回主页 → 自动重连 → 又失败」的死循环）。
+                if self.hasRecentNetworkChange, !self.isAutoReconnecting, !self.isConnecting {
+                    self.justHadNetworkChange = false      // 用掉就清，别影响下一次判断
+                    if let session = self.currentSession {
+                        print("[AutoReconnect] 因网络切换而断开 —— 自动重连（保留会话，不回主页）")
+                        // 先弹提示，让用户知道发生了什么
+                        if let cb = self.reusableStatusCallback {
+                            cb(ScrcpyStatusConnecting, "网络已切换，正在重连…", true)
+                        }
+                        self.performAutoReconnect(session)
+                        break
+                    }
+                    print("[AutoReconnect] 网络变过但没有可用会话，跳过")
+                }
+
                 // Check for ERROR in the last output and show alert if found
                 self.checkForErrorsAndShowAlert()
-                
+
                 self.isConnecting = false
 
-                // ★★ 自动重连期间**绝不清会话** —— 否则界面立刻回主页。
-                //
-                //   这是「卡一会直接回到主页」的真正元凶：重连时底层必然会先断一次，
-                //   底层一断就发 Disconnected 通知，走到这里 clearCurrentSession()，
-                //   会话被清成 nil，UI 就没得显示、只能回主页。
-                //   （前面绕过了 disconnectCurrent() 里的清理，但漏了这个通知处理器。）
-                //
-                //   重连是**原地重建**，会话本身一点没变，不该被清掉。
+                // ★ 自动重连期间**绝不清会话** —— 否则界面立刻回主页。
+                //   （走到这儿说明是上面那条分支之外的路径，保险再判一次。）
                 if self.isAutoReconnecting {
                     print("[AutoReconnect] 重连期间收到 Disconnected —— 保留会话，不回主页")
                     break
