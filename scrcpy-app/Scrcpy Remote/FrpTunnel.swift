@@ -30,6 +30,17 @@ final class FrpTunnel {
     private(set) var localPort: Int32 = 0
     private(set) var isRunning = false
 
+    /// 上次用过的本机端口 —— stop() 后**故意保留**。
+    ///
+    /// ★ 为什么必须记住它：SessionNetworking 是用 `findAvailablePort()` 挑端口的，
+    ///   而那个函数只判断"现在空不空"。万一旧 visitor 没停干净、端口仍被自己占着，
+    ///   它就会挑一个**不同的**端口 —— 真机日志里就是这么坏的：
+    ///     127.0.0.1:20000   device      ← 真正在监听、能用的
+    ///     127.0.0.1:20002   offline     ← App 以为隧道在这里，连它 Connection refused
+    ///   结果是界面显示"frp 隧道就绪"，scrcpy 却对着一个没人监听的端口死磕。
+    ///   重建时复用同一个端口就不会出现这种错位。
+    private(set) var lastUsedPort: Int32 = 0
+
     /// 正在打洞的那条 proxy 名（用来判断「同一条隧道是不是已经跑着了」）
     private(set) var currentProxyName: String = ""
 
@@ -71,12 +82,32 @@ final class FrpTunnel {
                preferredPort: Int32? = nil,
                keepTunnelOpen: Bool = true) -> Int32? {
 
-        if isRunning {
-            stop()
-        }
+        // ★ 无条件先停一次 —— 别只看自己的 isRunning 标志。
+        //
+        //   Swift 这边的状态和 Go 那边的 visitor 可能对不上（比如上次 stop 时
+        //   Go 侧没完全释放），那样旧 visitor 还占着本机端口，新的就起不来，
+        //   于是出现「App 报的端口 ≠ 实际监听的端口」这种错位。
+        //   frp_stop_visitor 是幂等的，没在跑时调用无害。
+        frp_stop_visitor()
+        isRunning = false
+        localPort = 0
 
-        // 本机监听端口（调用方一般会用 SessionNetworking 挑一个空闲的传进来）
-        let port = preferredPort ?? Int32(20000 + Int.random(in: 0..<4000))
+        // 本机监听端口。
+        //
+        // ★ 优先级：上次用过的 > 调用方指定 > 随机。
+        //   上次用过的排最前是刻意的 —— 调用方（SessionNetworking）是用
+        //   findAvailablePort() 挑的，而那个只判断"现在空不空"：
+        //   旧 visitor 没停干净时端口仍被自己占着，它会挑一个**不同的**端口，
+        //   于是 App 报的端口和实际监听的端口错位（真机日志：报 20002、实际在 20000），
+        //   scrcpy 对着没人听的端口死磕。复用同一个就不会错位。
+        let port: Int32
+        if lastUsedPort > 0 {
+            port = lastUsedPort
+        } else if let preferred = preferredPort {
+            port = preferred
+        } else {
+            port = Int32(20000 + Int.random(in: 0..<4000))
+        }
 
         // strdup 出来的 C 字符串要手动释放；用 defer 保证异常路径也不漏
         guard let cServer = strdup(serverAddr),
@@ -112,6 +143,8 @@ final class FrpTunnel {
         }
 
         localPort = port
+        // 记住这个端口 —— stop() 后重建时要复用它，避免和还在监听的旧 visitor 错位
+        lastUsedPort = port
         isRunning = true
         currentProxyName = proxyName
         print("[FrpTunnel] ✅ visitor 已启动，本机端口 \(port)（proxy=\(proxyName)）")
