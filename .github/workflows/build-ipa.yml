@@ -168,8 +168,14 @@ jobs:
           echo "=== 产物清单 ==="
           ls -lh libs/iphoneos/arm64/
 
+      # ⚠️ 只能删 porting/build，**不能删 scrcpy/x**！
+      #    scrcpy/x 是 meson 的构建目录（make scrcpy 里 `meson setup x` 生成的），
+      #    工程的头文件搜索路径里写着 $(SRCROOT)/../scrcpy/x，
+      #    而 ScrcpyRuntime.m 要 #import "app/config.h" —— 那个头正是生成在 scrcpy/x/app/。
+      #    删了它，App 编译直接报：'app/config.h' file not found。
+      #    （参考仓库那份跑通 20+ 次的配方里根本没有这一步。）
       - name: 清掉中间产物腾磁盘
-        run: rm -rf porting/build scrcpy/x
+        run: rm -rf porting/build
 
       - name: 编译 App（不签名）
         working-directory: scrcpy-app
