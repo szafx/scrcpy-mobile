@@ -483,18 +483,28 @@ class SessionNetworking {
     /// adb connect 上某台候选，读它的序列号。
     ///
     /// 用的是 App 自己那份 adbkey（已导入过被控端的授权列表），所以不会弹授权窗。
+    ///
+    /// ★ 读完**必须 disconnect** —— 这个连接只是用来认人的，留着会污染 adb 的设备表，
+    ///   之后 scrcpy 推 scrcpy-server 时就会炸：
+    ///     adb: error: failed to copy ... : remote unknown command 32444e53
+    ///   （实测：设备表里只有 1 台时 push 正常；被自动发现挂了 4 台后必失败。）
     private static func readSerialNumber(host: String, port: UInt16) async -> String? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 let target = "\(host):\(port)"
                 let client = ADBClient.shared()
                 _ = client.executeADBCommand(["connect", target], returnCode: nil)
+
                 var rc: Int32 = 0
                 let output = client.executeADBCommand(
                     ["-s", target, "shell", "getprop", "ro.serialno"],
                     returnCode: &rc
                 )
                 let serial = output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // 认完人就撤，别留下来干扰后面的 scrcpy
+                _ = client.executeADBCommand(["disconnect", target], returnCode: nil)
+
                 continuation.resume(returning: (rc == 0 && !serial.isEmpty) ? serial : nil)
             }
         }
