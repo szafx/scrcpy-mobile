@@ -130,14 +130,26 @@ struct MainContentView: View {
         guard !userDismissedConnection else {
             return false
         }
-        
+
+        // ★ 自动重连期间**必须**显示连接界面。
+        //
+        //   断连那一瞬间 connectionStatus 是 Disconnected，而下面那条
+        //   `connectionStatus != Disconnected` 会把它排除掉 —— 结果界面不显示，
+        //   卡在投屏页面上（用户实测：「切换就卡在投屏页面」）。
+        //
+        //   用户要的就是「回到正在连接的那个界面」：它有进度提示，也有 Dismiss
+        //   可以随时取消这次重连。
+        if connectionManager.isAutoReconnecting {
+            return true
+        }
+
         // 只有在以下情况下才显示 ConnectionStatusView：
         // 1. 正在连接中
         // 2. 连接失败（等待用户主动点击 dismiss 按钮）
         // 3. 有当前会话且状态处于连接过程中（不包括连接失败）
-        return connectionManager.isConnecting || 
+        return connectionManager.isConnecting ||
                (connectionManager.connectionStatus == ScrcpyStatusConnectingFailed && currentStatusMessage != nil) ||
-               (connectionManager.currentSession != nil && 
+               (connectionManager.currentSession != nil &&
                 connectionManager.connectionStatus != ScrcpyStatusDisconnected &&
                 connectionManager.connectionStatus != ScrcpyStatusConnectingFailed &&
                 connectionManager.connectionStatus.rawValue < ScrcpyStatusSDLWindowAppeared.rawValue)

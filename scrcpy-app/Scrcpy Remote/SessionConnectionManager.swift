@@ -147,8 +147,13 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     /// 会话不该被清掉（用户明确要求：「不该回主页，应该留在连接界面重连」）。
     private var isReconnecting = false
 
-    /// 重连进行中，避免叠加触发
-    private var isAutoReconnecting = false
+    /// 自动重连进行中（避免叠加触发）。
+    ///
+    /// ★ 对外可见：MainContentView 要据此把「正在连接」那个界面显示出来。
+    ///   不暴露的话，断连瞬间 connectionStatus 是 Disconnected，
+    ///   而连接界面的显示条件里有 `connectionStatus != Disconnected` ——
+    ///   于是界面不显示、卡在投屏页面上（用户实测：「切换就卡在投屏页面」）。
+    @Published private(set) var isAutoReconnecting = false
     /// 上次重连的时刻 —— 用来冷却。
     ///
     /// ★ 为什么必须冷却：切网时 `pathUpdateHandler` 会**连着报好几次**
@@ -347,13 +352,13 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         isAutoReconnecting = true
         print("[AutoReconnect] 连接已断（网络切换导致），自动重连…")
         statusCallback(ScrcpyStatusConnecting, "网络已切换，正在重连…", true)
-        // ★ 同时显示在气泡上。投屏画面这会儿是**冻结的**（连接断了），
-        //   而 SwiftUI 的状态界面被 SDL 原生窗口盖住 ——
-        //   用户实测「重连的时候我根本看不到提示，只能看到卡住」。
-        //   （LatencyBadgeWindow 是 @MainActor，这里显式切到主线程调用。）
-        DispatchQueue.main.async {
-            LatencyBadgeWindow.shared.showBanner("网络已切换，正在重连…")
-        }
+
+        // 注意：这里**不再往气泡上写提示**。
+        // 用户指出的对：重连就该回到「正在连接」那个界面上进行 ——
+        // 它本来就有进度提示和 Dismiss 按钮，气泡上再挂一条是画蛇添足。
+        // （之前那么做是因为误判了「SwiftUI 界面被 SDL 挡住」，
+        //   实际原因连接界面压根没被要求显示，见 MainContentView 里
+        //   shouldShowConnectionStatusView 的 isAutoReconnecting 分支。）
 
         // ★ 用重连专用的拆解 —— 保留会话，UI 就留在连接界面上原地重连，
         //   而不是被 clearCurrentSession() 踢回主页（用户明确要求的行为）。
