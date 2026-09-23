@@ -317,7 +317,7 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
 
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            // ★★ 只在「已经稳定连着」时才主动拆。
+            // ★★ 只在「已经稳定连着」时才考虑主动拆。
             //
             //   以前的条件是「不是 Disconnected」，太宽了 —— 于是：
             //     切到蜂窝 → pdp_ip0 反复报路径变化 → 每次都排一个 2 秒定时器
@@ -325,9 +325,6 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
             //       就把**刚建好的好连接**又拆掉了（真机日志：
             //       Starting connection 刚过、紧跟着就是「主动拆掉重连」）
             //   结果是永远在重连、卡在「frp 隧道就绪」。
-            //
-            //   现在只有 Connected / SDLWindowAppeared 才认为"确实连着"，
-            //   连接中、断开、失败一律不插手。
             let stable = self.connectionStatus == ScrcpyStatusConnected
                       || self.connectionStatus == ScrcpyStatusSDLWindowAppeared
             guard stable,
@@ -335,9 +332,30 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                   !self.isConnecting,
                   self.currentSession != nil else { return }
 
-            print("[AutoReconnect] 网络已变但底层还挂着（在等 TCP 超时）—— 主动拆掉重连")
-            if let session = self.currentSession {
-                self.performAutoReconnect(session)
+            // ★★ 但"网络变了"不等于"连接断了" —— WiFi 信号飘的时候，
+            //   iOS 会连着报几十条路径变化，而连接其实好端端的。
+            //   所以**先探一次**：通了就什么都不做，别去打扰一条健康的连接。
+            //
+            //   （早先版本在这里"探测"被判过一次死刑，但那次是**收到网络变化
+            //     就立刻探**，那时连接确实还没断透、判成"还通"。
+            //     现在是**等 2 秒再探** —— 该断的早断了，探测结果才可信。）
+            guard let host = self.actualHost,
+                  let portText = self.actualPort,
+                  let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return }
+
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let alive = LanDiscovery.measureRoundTrip(host: host, port: port, timeout: 2) != nil
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if alive {
+                        print("[AutoReconnect] 网络变过但连接仍然通 —— 不动它")
+                        return
+                    }
+                    print("[AutoReconnect] 网络已变且连接确实不通了 —— 主动拆掉重连")
+                    if let session = self.currentSession {
+                        self.performAutoReconnect(session)
+                    }
+                }
             }
         }
         proactiveTeardown = work

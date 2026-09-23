@@ -227,10 +227,8 @@ private struct LatencyBadgeHost: View {
             // 往外扩一点当抓取区：视觉上小巧，但手指按得中
             let hit = frame.insetBy(dx: -BadgePosition.grabMargin,
                                     dy: -BadgePosition.grabMargin)
-            if BadgePosition.shared.hitFrame != hit {
-                BadgePosition.shared.hitFrame = hit
-                print("[LatencyBadgeWindow] 命中区更新: \(hit)")
-            }
+            // 不打印 —— 延迟数字一变宽度就变，这里会刷屏、把别的日志全淹了
+            BadgePosition.shared.hitFrame = hit
         }
     }
 }
