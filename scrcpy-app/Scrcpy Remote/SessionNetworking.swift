@@ -355,7 +355,51 @@ class SessionNetworking {
 
         print("[SessionNetworking] frp 隧道就绪: \(session.hostReal):\(session.port) -> 127.0.0.1:\(port)")
         statusUpdateCallback?("frp 隧道就绪")
+        watchFrpTunnelDecision()
         return frpConnectionInfo(session: session, localPort: Int(port))
+    }
+
+    /// 盯着 frp 到底走了「P2P 打洞」还是「退回中转」，把结果报给界面。
+    ///
+    /// 为什么要读日志：frp 内部选哪条路是它自己决定的，**没有运行时回调**，
+    /// 只能读 visitor 自己写的 `frpc_visitor.log`。
+    /// 用户明确希望能看到「P2P 打洞失败，正在走 frp 中转」这种提示。
+    ///
+    /// 只轮询十几秒就收工 —— 打洞结果一般几秒内就出，长跑没意义。
+    private func watchFrpTunnelDecision() {
+        let logPath = (FrpTunnel.defaultBaseDir as NSString).appendingPathComponent("frpc_visitor.log")
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            // 从文件末尾往前读，只看最近的内容，免得被历史记录误导
+            func readTail() -> String? {
+                guard let handle = FileHandle(forReadingAtPath: logPath) else { return nil }
+                defer { try? handle.close() }
+                let size = (try? handle.seekToEnd()) ?? 0
+                let window: UInt64 = 8192
+                let offset = size > window ? size - window : 0
+                try? handle.seek(toOffset: offset)
+                guard let data = try? handle.readToEnd(), let data else { return nil }
+                return String(data: data, encoding: .utf8)
+            }
+
+            for _ in 0..<15 {
+                Thread.sleep(forTimeInterval: 1.0)
+                guard let tail = readTail() else { continue }
+
+                if tail.contains("nat hole connection successful") {
+                    DispatchQueue.main.async {
+                        self?.statusUpdateCallback?("P2P 打洞成功，正在直连…")
+                    }
+                    return
+                }
+                if tail.contains("make hole error") {
+                    DispatchQueue.main.async {
+                        self?.statusUpdateCallback?("P2P 打洞未成功，正在走 frp 中转…")
+                    }
+                    return
+                }
+            }
+        }
     }
 
     /// 组装 frp 隧道的连接信息（host 指到本机，native 侧走 hostReal）。
