@@ -473,7 +473,23 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 //   判据是「最近刚发生过网络变化」：网络切换导致的断开才值得重连；
                 //   用户手动断开、或者连接本来就失败，都不该自动重连
                 //   （否则就是「失败 → 回主页 → 自动重连 → 又失败」的死循环）。
-                if self.hasRecentNetworkChange, !self.isAutoReconnecting, !self.isConnecting {
+                // ★★ 先排除「用户主动断开」。
+                //
+                //   菜单里的「关闭连接」**不经过 disconnectCurrent()** ——
+                //   它是 App 内部直接断开的，只发一条 Disconnected 通知。
+                //   所以在那儿清标记没用（第一次就是这么修的，没生效）。
+                //
+                //   可靠的判据是断开消息本身：用户主动断开时它是
+                //   "User disconnected from ADB client"（真机日志实锤）。
+                let userInitiated = disconnectMessage?.localizedCaseInsensitiveContains("user disconnected") == true
+                if userInitiated {
+                    print("[AutoReconnect] 用户主动断开 —— 不重连，清掉网络变化标记")
+                    self.justHadNetworkChange = false
+                    self.justHadNetworkChangeAt = nil
+                }
+
+                if self.hasRecentNetworkChange, !userInitiated,
+                   !self.isAutoReconnecting, !self.isConnecting {
                     self.justHadNetworkChange = false      // 用掉就清，别影响下一次判断
                     if let session = self.currentSession {
                         print("[AutoReconnect] 因网络切换而断开 —— 自动重连（保留会话，不回主页）")

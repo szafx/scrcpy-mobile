@@ -207,10 +207,12 @@ private struct LatencyBadgeHost: View {
         }
         .onPreferenceChange(BadgeFrameKey.self) { frame in
             // 往外扩一点当抓取区：视觉上小巧，但手指按得中
-            BadgePosition.shared.hitFrame = frame.insetBy(
-                dx: -BadgePosition.grabMargin,
-                dy: -BadgePosition.grabMargin
-            )
+            let hit = frame.insetBy(dx: -BadgePosition.grabMargin,
+                                    dy: -BadgePosition.grabMargin)
+            if BadgePosition.shared.hitFrame != hit {
+                BadgePosition.shared.hitFrame = hit
+                print("[LatencyBadgeWindow] 命中区更新: \(hit)")
+            }
         }
     }
 }
