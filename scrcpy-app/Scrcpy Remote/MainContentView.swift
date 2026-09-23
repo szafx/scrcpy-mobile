@@ -313,6 +313,11 @@ struct MainContentView: View {
                         
                     case ScrcpyStatusConnected:
                         print("✅ [MainContentView] Connection successful, preparing to hide status view")
+                        // 连接成功就把「走哪条路 + 延迟」的气泡浮上去。
+                        // ★ 别只等 SDLWindowAppeared(7) —— 那个状态**只有 VNC 那条路会发**
+                        //   （见 ScrcpyVNCRuntime.m），scrcpy/ADB 模式压根不发，
+                        //   挂在那儿的话气泡永远不出现。
+                        LatencyBadgeWindow.shared.show()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             currentStatusMessage = nil
                             print("🧹 [MainContentView] currentStatusMessage cleared after connection success")
@@ -518,6 +523,11 @@ struct MainContentView: View {
                         
                     case ScrcpyStatusConnected:
                         print("✅ [MainContentView] Connection successful, preparing to hide status view")
+                        // 连接成功就把「走哪条路 + 延迟」的气泡浮上去。
+                        // ★ 别只等 SDLWindowAppeared(7) —— 那个状态**只有 VNC 那条路会发**
+                        //   （见 ScrcpyVNCRuntime.m），scrcpy/ADB 模式压根不发，
+                        //   挂在那儿的话气泡永远不出现。
+                        LatencyBadgeWindow.shared.show()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             currentStatusMessage = nil
                             print("🧹 [MainContentView] currentStatusMessage cleared after connection success")
