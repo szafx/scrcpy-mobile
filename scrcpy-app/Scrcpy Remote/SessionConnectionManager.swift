@@ -524,7 +524,9 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 //
                 //   可靠的判据是断开消息本身：用户主动断开时它是
                 //   "User disconnected from ADB client"（真机日志实锤）。
-                let userInitiated = disconnectMessage?.localizedCaseInsensitiveContains("user disconnected") == true
+                // 用 statusMessage 而不是上面的 disconnectMessage —— 后者在 if let 的作用域里，
+                // 出了那个块就不可见了（编译报 cannot find in scope）。
+                let userInitiated = statusMessage?.localizedCaseInsensitiveContains("user disconnected") == true
                 if userInitiated {
                     print("[AutoReconnect] 用户主动断开 —— 不重连，清掉网络变化标记")
                     self.justHadNetworkChange = false
