@@ -128,8 +128,11 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     private var pendingReconnectCheck: DispatchWorkItem?
     /// 重连进行中，避免叠加触发
     private var isAutoReconnecting = false
-    /// 网络切换常常连着抖几下（WiFi→无网→蜂窝），先等它稳定
-    private let reconnectDebounce: TimeInterval = 3.0
+    /// 网络切换常常连着抖几下（WiFi→无网→蜂窝），等一下让它稳定再动手。
+    ///
+    /// 但**别太长** —— 这段等待里画面是冻结的、菜单点什么都没反应，
+    /// 用户看起来就是"卡住"。实测反馈：「页面卡住，过一会自动退回主页」。
+    private let reconnectDebounce: TimeInterval = 1.5
     
     /// 当前 Action 确认回调闭包
     private var currentActionConfirmationCallback: ActionConfirmationCallback?
@@ -249,32 +252,25 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         DispatchQueue.main.asyncAfter(deadline: .now() + reconnectDebounce, execute: work)
     }
 
-    /// 网络变了之后，确认一下当前连接是不是真的断了；断了就自动重连。
+    /// 网络路径变了 → 直接重连。
+    ///
+    /// ★★ 这里**故意不做「还通不通」的探测**，这是个踩过的坑：
+    ///
+    ///   TCP 连接是**绑定源地址**的，切网（WiFi↔蜂窝）之后旧连接**必然作废**，
+    ///   本来就不需要探测。而之前那版会先探一次，问题是**探测的时机太早** ——
+    ///   那一刻 frp 隧道还没断透，本地 listener 仍然接受连接，于是判成
+    ///   「还通、保持不动」。可等它真断的时候已经没有后续探测了，
+    ///   App 就**永远不知道断了**：画面冻结、什么都不响应、也走不到「正在重连」。
+    ///
+    ///   用户实测就是这个：「两次连接状态下蜂窝和 wifi 的切换都没有看到
+    ///   正在重连这个东西」，日志里则是连着几条
+    ///   `网络变了但连接还通，保持不动`。
+    ///
+    ///   所以现在：路径变化 = 连接作废 = 直接重连。
+    ///   重连会重新走完整判定（WiFi 下回局域网、蜂窝下落 frp），不会连错。
     private func verifyConnectionAndReconnectIfNeeded() {
-        guard !isAutoReconnecting,
-              let session = currentSession,
-              let host = actualHost,
-              let portText = actualPort,
-              let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else {
-            return
-        }
-
-        // ★ 判据必须是「真实往返」，不能是连接状态 ——
-        //   切网后旧连接可能还"看起来"在（尤其是 WiFi→蜂窝 的瞬间），
-        //   但包已经出不去了。只有真的发一次、等到对端反应才算数。
-        //
-        // 测量是阻塞的 socket 调用，放后台队列；结果回主线程再动连接。
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let stillAlive = LanDiscovery.measureRoundTrip(host: host, port: port, timeout: 2.0) != nil
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if stillAlive {
-                    print("[AutoReconnect] 网络变了但连接还通，保持不动")
-                    return
-                }
-                self.performAutoReconnect(session)
-            }
-        }
+        guard !isAutoReconnecting, let session = currentSession else { return }
+        performAutoReconnect(session)
     }
 
     private func performAutoReconnect(_ session: ScrcpySessionModel) {
