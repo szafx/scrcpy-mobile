@@ -146,27 +146,29 @@ jobs:
         if: steps.libcache.outputs.cache-hit != 'true'
         run: make -C porting vncclient
 
-      # 上游 libtsnet 只提交了 go.sum、没提交 go.mod，现场补一个（模块名要和源码里的 import 对上）
-      - name: 编译 libtsnet
-        if: steps.libcache.outputs.cache-hit != 'true'
-        run: |
-          cd porting/libtsnet
-          [ -f go.mod ] || go mod init me.wsen.scrcpy-tsnet
-          go mod tidy
-          cd ..
-          make tsnet-forwarder
-
-      # ★ 我们加的：内嵌 frp visitor（被控端 frpc XTCP 的配对端，打通走 P2P）
-      - name: 编译 libfrp
+      # ★★ 一个库管两个功能（frp visitor + tsnet），**故意不拆成两步**：
+      #   Go 的 -buildmode=c-archive 每个库自带一整套 Go runtime，
+      #   两个这样的库进同一个 App → 重名符号被去重 → 共用一套 runtime 状态 → 一调用就崩。
+      #   实测铁证：App 二进制里 `\xff Go buildinf:`（Go 运行时指纹）出现过 2 次。
+      #   libtsnet 的代码已并进 porting/libfrp/libtsnet/，编译入口是 libfrp 的 cmd/c-binding。
+      - name: 编译 libmobile（frp + tsnet，合成一个 c-archive）
         run: |
           cd porting/libfrp
           go mod tidy
           make build-iphoneos-arm64
-          cp -v build/iphoneos/arm64/libfrp-forwarder.a ../libs/iphoneos/arm64/
-          cp -v build/iphoneos/arm64/libfrp-forwarder.h ../libs/include/
+          cp -v build/iphoneos/arm64/libmobile-forwarder.a ../libs/iphoneos/arm64/
+          cp -v build/iphoneos/arm64/libmobile-forwarder.h ../libs/include/
           cd ..
           echo "=== 产物清单 ==="
           ls -lh libs/iphoneos/arm64/
+          # 自检：两边的导出符号都要在，少一个说明合并没生效
+          for sym in _frp_start_visitor _tsnet_start_forward; do
+            if ! nm libs/iphoneos/arm64/libmobile-forwarder.a 2>/dev/null | grep -q "$sym"; then
+              echo "::error::libmobile-forwarder.a 里没有 $sym —— 合并漏了东西"
+              exit 1
+            fi
+          done
+          echo "✅ frp 和 tsnet 的符号都在"
 
       # ⚠️ 只能删 porting/build，**不能删 scrcpy/x**！
       #    scrcpy/x 是 meson 的构建目录（make scrcpy 里 `meson setup x` 生成的），
