@@ -48,8 +48,10 @@ final class LatencyBadgeWindow {
         newWindow.windowLevel = .normal + 1
         newWindow.backgroundColor = .clear
         newWindow.isOpaque = false
-        // ★ 只要显示不要交互 —— 彻底穿透，不干扰投屏的手势
-        newWindow.isUserInteractionEnabled = false
+        // 气泡本身要能点（点开看抖动和目标地址），
+        // 但**只有气泡那一小块**吃事件，其余全部穿透给下面的投屏窗口 ——
+        // 具体由 PassthroughWindow.hitTest 控制。
+        newWindow.isUserInteractionEnabled = true
         newWindow.rootViewController = UIHostingController(rootView: LatencyBadgeHost())
         newWindow.rootViewController?.view.backgroundColor = .clear
 
@@ -70,15 +72,22 @@ final class LatencyBadgeWindow {
     }
 }
 
-/// 透明窗口：把触摸全部放行给下层。
+/// 只让气泡那一小块吃触摸，其余位置穿透给下面的投屏窗口。
+///
+/// 判据：`super.hitTest` 返回的如果是**透传容器本身**（rootViewController.view），
+/// 说明这个点没落在气泡上 —— 这时返回 nil，事件就会继续传给下层窗口。
+/// 落在气泡上时返回的是气泡内部的视图，正常响应。
 private final class PassthroughWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        // 整窗不参与命中测试 —— 无论如何都把事件交给下面的窗口
-        return nil
+        guard let hit = super.hitTest(point, with: event) else { return nil }
+        return hit === rootViewController?.view ? nil : hit
     }
 }
 
 /// 气泡的摆放：贴右上角，留出安全区。
+///
+/// 注意这里**不能**加 `.allowsHitTesting(false)` —— 那会让气泡点不动。
+/// 触摸要不要穿透由 PassthroughWindow.hitTest 统一决定。
 private struct LatencyBadgeHost: View {
     var body: some View {
         VStack {
@@ -90,6 +99,5 @@ private struct LatencyBadgeHost: View {
             }
             Spacer()
         }
-        .allowsHitTesting(false)
     }
 }

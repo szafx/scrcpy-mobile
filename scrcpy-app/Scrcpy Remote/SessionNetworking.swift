@@ -415,13 +415,18 @@ class SessionNetworking {
     private func findLanHost(portText: String, session: ScrcpySessionModel) async -> String? {
         guard let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return nil }
 
-        // 先看缓存：对上次扫到的地址快速探一下（0.5s），通的直接进匹配
+        // 先看缓存：对上次扫到的地址做一次**真实往返**验证，通的直接进匹配。
+        //
+        // ★ 这里必须用「发字节等 EOF」而不是 NWConnection 的 ready 状态：
+        //   切网的瞬间（WiFi→蜂窝）WiFi 接口还没消失，NWConnection 可能仍然报 ready，
+        //   但那时的连接其实已经不通了 —— 实测就是被这个坑到，蜂窝下还拿着
+        //   局域网的缓存地址去连，白等一场。
         var candidates = lanScanCache
         if let scannedAt = lanScanAt, Date().timeIntervalSince(scannedAt) < lanScanTTL {
             let alive = await withTaskGroup(of: (LanDiscovery.Candidate, Bool).self) { group -> [LanDiscovery.Candidate] in
                 for candidate in candidates {
                     group.addTask {
-                        (candidate, await self.isReachable(host: candidate.host, portText: portText, timeout: 0.5))
+                        (candidate, await self.isAlive(host: candidate.host, port: port, timeout: 1.0))
                     }
                 }
                 var hits: [LanDiscovery.Candidate] = []
@@ -548,6 +553,20 @@ class SessionNetworking {
         lanScanCache = found
         lanScanAt = Date()
         return found
+    }
+
+    /// 目标是否**真的**还活着 —— 用一次完整往返来验证，而不是只看连接状态。
+    ///
+    /// 为什么不用 isReachable：切网瞬间（WiFi→蜂窝）WiFi 接口还在，
+    /// NWConnection 可能仍报 ready，但包已经出不去了。只有真的发一个字节、
+    /// 等到对端反应（adbd 会关连接），才能确认这条路当前是通的。
+    private func isAlive(host: String, port: UInt16, timeout: TimeInterval) async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let ms = LanDiscovery.measureRoundTrip(host: host, port: port, timeout: timeout)
+                continuation.resume(returning: ms != nil)
+            }
+        }
     }
 
     /// 目标地址能不能连上（用来判断「现在是不是和手机在同一个局域网」）。

@@ -103,26 +103,22 @@ final class LatencyMonitor: ObservableObject {
 
     private func probe() {
         let manager = SessionConnectionManager.shared
-        guard let host = manager.actualHost, let port = manager.actualPort, !port.isEmpty else {
+        guard let host = manager.actualHost,
+              let portText = manager.actualPort,
+              let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else {
             return
         }
 
-        let tester = TCPLatencyTester(host: host, port: port)
-        tester.connectionTimeout = 4
-        tester.readTimeout = 4
-
-        tester.testLatency { [weak self] latency, error in
-            Task { @MainActor in
-                guard let self else { return }
-                if let error {
-                    // 探测失败不代表连接断了（可能只是 adbd 这一刻没回），
-                    // 所以只标记为未知，不把已有的读数清掉。
-                    print("[LatencyMonitor] 探测失败: \(error.localizedDescription)")
-                    return
-                }
-                guard let latency else { return }
-                let ms = latency.doubleValue * 1000.0
-                self.record(ms)
+        // 测量是阻塞的 socket 调用，丢到后台队列去，别占着主线程。
+        // 用 LanDiscovery.measureRoundTrip 而不是工程里的 TCPLatencyTester ——
+        // 后者等的是「对方回数据」，而 adbd 收到非协议字节只关连接、不回内容，
+        // 实测每次都 "Failed to receive response"，气泡上的延迟一直出不来。
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let ms = LanDiscovery.measureRoundTrip(host: host, port: port, timeout: 4) else {
+                return
+            }
+            DispatchQueue.main.async {
+                self?.record(ms)
             }
         }
     }

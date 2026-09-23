@@ -17,6 +17,7 @@
 //      不然要扫 6 万多个地址。
 //
 
+import Darwin
 import Foundation
 
 struct LanDiscovery {
@@ -220,5 +221,59 @@ struct LanDiscovery {
                 raw[offset] |= mask
             }
         }
+    }
+
+    // MARK: - 延迟测量（测到目标的往返）
+
+    /// 测一次到目标的往返延迟（毫秒）。连不上返回 nil。
+    ///
+    /// ★ 为什么不用工程里现成的 TCPLatencyTester：
+    ///   它的逻辑是「发数据 → **等对方回数据**」。但这里的目标是 adbd，
+    ///   adbd 收到非 adb 协议的字节只会**直接关连接、不吐任何内容**，
+    ///   所以永远等不到响应 —— 实测每 2 秒一次、全报 "Failed to receive response"，
+    ///   气泡上的延迟就一直显示不出来。
+    ///
+    ///   改成「发一个字节 → **等连接被关闭**」：对端关闭意味着这一来一回已经走完，
+    ///   EOF 到达的时间就是一次完整的往返。这也顺带覆盖了 frp 隧道的情况
+    ///   （隧道把字节送到手机、手机上的 adbd 关连接、关闭事件再穿回来）。
+    static func measureRoundTrip(host: String, port: UInt16, timeout: TimeInterval) -> Double? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return nil }
+
+        // 连接超时和读超时都设上，避免任何一个阶段挂死
+        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        let start = Date()
+
+        let connectResult = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connectResult == 0 else { return nil }
+
+        // 发一个字节触发对端关闭（内容无所谓，adbd 只认协议不认内容）
+        var byte: UInt8 = 0
+        guard send(fd, &byte, 1, 0) == 1 else { return nil }
+
+        // 等 EOF：recv 返回 0 就是对端关了；返回 -1 代表出错/超时，也当结束
+        var buffer = [UInt8](repeating: 0, count: 64)
+        let received = recv(fd, &buffer, buffer.count, 0)
+        let elapsed = Date().timeIntervalSince(start) * 1000.0
+
+        // 只有真正等到对端动作（EOF 或有数据）才算有效样本；
+        // 超时（EAGAIN）说明对端压根没理我们，这种数不能拿来显示。
+        if received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return nil
+        }
+        return elapsed
     }
 }
