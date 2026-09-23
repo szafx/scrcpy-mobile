@@ -427,10 +427,54 @@ class SessionNetworking {
             return nil
         }
 
+        // ★ 等到**真正打通**再返回，别只看本地 listener。
+        //
+        //   真机日志实锤了这个竞态（时间戳几乎撞在同一秒）：
+        //     visitor 14:10:36  establishing nat hole connection successful
+        //     App     22:10:36  Device connect status: 127.0.0.1:20000 -> offline
+        //   waitForLocalPort 只保证本机 listener 起来了，可那时**打洞还没做完**，
+        //   于是 adb 立刻去连、拿到一个 offline、连接失败。
+        //   界面还会显示「frp 隧道就绪」—— 对用户来说就是"明明就绪了却连不上"。
+        await waitForTunnelEstablished()
+
         print("[SessionNetworking] frp 隧道就绪: \(session.hostReal):\(session.port) -> 127.0.0.1:\(port)")
         statusUpdateCallback?("frp 隧道就绪")
         watchFrpTunnelDecision()
         return frpConnectionInfo(session: session, localPort: Int(port))
+    }
+
+    /// 等 visitor 真的把隧道打通（或超时兜底）。
+    ///
+    /// 判据是它自己写在 `frpc_visitor.log` 里的
+    /// `establishing nat hole connection successful` —— frp 没有运行时 API，
+    /// 读日志是唯一能知道"打洞好了没"的办法。
+    ///
+    /// 超时也不会卡死：到点就走，让 adb connect 去试（失败了还有回落后手）。
+    private func waitForTunnelEstablished(timeout: TimeInterval = 12) async {
+        let logPath = (FrpTunnel.defaultBaseDir as NSString).appendingPathComponent("frpc_visitor.log")
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 300_000_000)   // 0.3s 一轮
+            guard let tail = Self.readLogTail(path: logPath, maxBytes: 16 * 1024) else { continue }
+            let recent = String(tail.suffix(4000))
+            if recent.contains("nat hole connection successful") {
+                print("[SessionNetworking] 隧道已打通（visitor 报告成功）")
+                return
+            }
+        }
+        print("[SessionNetworking] 等隧道打通超时（\(Int(timeout))s）—— 照样往下走，交给 adb 去试")
+    }
+
+    /// 读文件末尾若干字节（日志可能很大，别整个读进来）。
+    private static func readLogTail(path: String, maxBytes: Int) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let offset = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        try? handle.seek(toOffset: offset)
+        guard let data = try? handle.readToEnd(), let data else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// 盯着 frp 到底走了「P2P 打洞」还是「退回中转」，把结果报给界面。
