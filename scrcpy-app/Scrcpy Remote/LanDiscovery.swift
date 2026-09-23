@@ -283,18 +283,54 @@ struct LanDiscovery {
         addr.sin_port = port.bigEndian
         guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return nil }
 
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
         let start = Date()
+
+        // ★★ connect 必须用**非阻塞 + select**，不能指望 SO_SNDTIMEO。
+        //
+        //   SO_SNDTIMEO / SO_RCVTIMEO 只管 send / recv，**管不了 connect** ——
+        //   connect 有自己的系统超时（几十秒）。真机实测：蜂窝下拿一个不可达的
+        //   192.168.x.x 去探活，明明传了 1 秒超时，却整整卡了 30 秒才失败，
+        //   界面就一直停在 preparing connection。
+        //
+        //   （扫描用的 isPortOpen 本来就是非阻塞写法，所以没这个问题；
+        //     这里是后加的方法，漏了。）
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0 else { return nil }
 
         let connectResult = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard connectResult == 0 else { return nil }
+
+        if connectResult != 0 {
+            guard errno == EINPROGRESS else { return nil }
+
+            var writeSet = fd_set()
+            var errorSet = fd_set()
+            setFd(fd, &writeSet)
+            setFd(fd, &errorSet)
+            var tv = timeval()
+            tv.tv_sec = Int(timeout)
+            tv.tv_usec = Int32((timeout - Double(Int(timeout))) * 1_000_000)
+
+            guard select(fd + 1, nil, &writeSet, &errorSet, &tv) > 0 else { return nil }
+
+            var soError: Int32 = 0
+            var length = socklen_t(MemoryLayout<Int32>.size)
+            guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &length) == 0, soError == 0 else {
+                return nil
+            }
+        }
+
+        // 连上了 —— 切回阻塞模式，后面的 send/recv 才好按超时来
+        _ = fcntl(fd, F_SETFL, flags)
+        var ioTimeout = timeval()
+        ioTimeout.tv_sec = Int(timeout)
+        ioTimeout.tv_usec = Int32((timeout - Double(Int(timeout))) * 1_000_000)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &ioTimeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &ioTimeout, socklen_t(MemoryLayout<timeval>.size))
+        _ = start
 
         // 组装一个最小的 adb CNXN 包
         let payload = Array("host::\0".utf8)
