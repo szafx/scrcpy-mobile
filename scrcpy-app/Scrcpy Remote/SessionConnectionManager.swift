@@ -140,6 +140,13 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     private let pathMonitor = NWPathMonitor()
     /// 待执行的重连检查（网络抖动时会被取消重排）
     private var pendingReconnectCheck: DispatchWorkItem?
+    /// 这次「连接」是自动重连发起的。
+    ///
+    /// 用途：让 connectToSession 跳过开头的「先 disconnectCurrent()」那步 ——
+    /// 那一步会 clearCurrentSession() 把界面踢回主页，而重连是要**原地**重建，
+    /// 会话不该被清掉（用户明确要求：「不该回主页，应该留在连接界面重连」）。
+    private var isReconnecting = false
+
     /// 重连进行中，避免叠加触发
     private var isAutoReconnecting = false
     /// 上次重连的时刻 —— 用来冷却。
@@ -348,15 +355,18 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
             LatencyBadgeWindow.shared.showBanner("网络已切换，正在重连…")
         }
 
-        disconnectCurrent()
-        // 给底层一点时间收尾：frp 隧道、tsnet 转发都要清理干净再重来，
-        // 否则新连接可能接到半死不活的旧隧道上。
+        // ★ 用重连专用的拆解 —— 保留会话，UI 就留在连接界面上原地重连，
+        //   而不是被 clearCurrentSession() 踢回主页（用户明确要求的行为）。
+        teardownConnectionForReconnect()
         //
         // 重连会重新走一遍「局域网优先、否则隧道」的判定 ——
         // 所以 WiFi 走到蜂窝会自动落到 frp，走回来又会自动回到局域网。
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self else { return }
             self.isAutoReconnecting = false
+            // 标记这次连接来自自动重连 —— connectToSession 据此跳过「先断开」那步，
+            // 免得又调 clearCurrentSession() 把界面踢回主页。
+            self.isReconnecting = true
             self.connectToSession(session, statusCallback: statusCallback, errorCallback: errorCallback)
         }
     }
@@ -646,11 +656,21 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         reusableStatusCallback = statusCallback
         reusableErrorCallback = errorCallback
         
-        // 如果当前状态不是 Disconnected，先断开现有连接
-        if connectionStatus != ScrcpyStatusDisconnected {
+        // ★ 读取后立刻复位 —— 这个标记只对本次连接有效，
+        //   免得影响用户之后手动发起的连接（那一次是**应该**先断开的）。
+        let fromAutoReconnect = isReconnecting
+        isReconnecting = false
+
+        // 如果当前状态不是 Disconnected，先断开现有连接。
+        //
+        // ★ 但**自动重连发起的这次不行** —— 那个 disconnectCurrent() 会调
+        //   clearCurrentSession()，把 currentSession 清掉、UI 直接回主页。
+        //   而重连刚在上一步用 teardownConnectionForReconnect() 原地拆过了，
+        //   这里再拆一次既多余、又会把用户从连接界面踢走。
+        if connectionStatus != ScrcpyStatusDisconnected, !fromAutoReconnect {
             print("🔄 [SessionConnectionManager] Current status is \(connectionStatus.description), disconnecting first")
             disconnectCurrent()
-            
+
             // 等待断开完成后再开始新连接
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self.performConnection(to: session, statusCallback: statusCallback, errorCallback: errorCallback)
@@ -1084,6 +1104,34 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     }
     
     /// 断开当前连接
+    /// 重连专用：拆掉旧连接和转发，但**保留会话**。
+    ///
+    /// ★ 为什么不直接用 disconnectCurrent()：它最后会 `clearCurrentSession()`，
+    ///   把 currentSession 清成 nil —— UI 就没有会话可显示，直接回主页
+    ///   （用户实测：「关闭 wifi 后他马上给我退回主页」，而他想要的是
+    ///   「留在连接界面原地重连」）。
+    ///
+    ///   重连本来就是原地重建，会话本身一点没变，不该被清掉。
+    private func teardownConnectionForReconnect() {
+        print("🔌 [AutoReconnect] 拆掉旧连接（保留会话，UI 不回主页）")
+
+        if let wrapper = scrcpyClientWrapper {
+            wrapper.disconnectCurrentClient()
+        } else {
+            NotificationCenter.default.post(
+                name: Notification.Name("ScrcpyRequestDisconnectNotification"),
+                object: nil
+            )
+        }
+
+        // 转发要停干净 —— 旧隧道把本机端口占着不放，新的就绑不上
+        if isUsingTailscale || currentSession?.useFrp == true {
+            SessionNetworking.shared.stopAllForwarding()
+        }
+
+        // ★ 这里**故意不调 clearCurrentSession()** —— 会话留着，界面就还在。
+    }
+
     func disconnectCurrent() {
         guard connectionStatus != ScrcpyStatusDisconnected else {
             print("🚫 [SessionConnectionManager] Already disconnected, no action needed")
