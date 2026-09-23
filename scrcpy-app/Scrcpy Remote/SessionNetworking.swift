@@ -378,7 +378,7 @@ class SessionNetworking {
                 let window: UInt64 = 8192
                 let offset = size > window ? size - window : 0
                 try? handle.seek(toOffset: offset)
-                guard let data = try? handle.readToEnd(), let data else { return nil }
+                guard let data = try? handle.readToEnd() else { return nil }
                 return String(data: data, encoding: .utf8)
             }
 
