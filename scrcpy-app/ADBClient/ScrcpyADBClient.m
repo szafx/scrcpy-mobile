@@ -255,6 +255,20 @@ void ScrcpyTryResetVideo(void) {
     NSString *port = arguments[@"port"];
     NSString *serial = [NSString stringWithFormat:@"%@:%@", host, port];
 
+    // ★★ 先断开同名条目，强制这次 connect 真正重建连接。
+    //
+    //   为什么必须这么做：adb 看到已有同名条目时会直接回 "already connected"
+    //   而**不重建底层连接**。可切网之后那条连接其实已经死了（adb 里显示 offline），
+    //   于是 scrcpy 拿到一条死连接、失败，并提示「请接受 adb 授权」——
+    //   而那个提示是**误导**：根本不是授权问题，是旧连接没被清掉。
+    //
+    //   真机日志（19:47:12）为证：
+    //     already connected to 127.0.0.1:20000
+    //     127.0.0.1:20000      offline      ← frp 隧道是好的，坏的是 adb 这条
+    //
+    //   断开一个不存在的条目 adb 只会回个错误，忽略即可（returnCode 传 NULL）。
+    [ADBClient.shared executeADBCommand:@[@"disconnect", serial] returnCode:NULL];
+
     // Update session completion and arguments
     self.sessionCompletion = completion;
     self.sessionArguments = arguments;

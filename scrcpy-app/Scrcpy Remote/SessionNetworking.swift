@@ -135,10 +135,10 @@ class SessionNetworking {
         let skipLAN = didFallbackToTunnel
         didFallbackToTunnel = false
 
-        if session.useFrp || session.useTailscale, !skipLAN {
-            // 先告诉用户在扫局域网 —— 扫描要一两秒，不给提示会像卡住了
-            statusUpdateCallback?("正在扫描局域网，寻找可直连的设备…")
-        }
+        // 注意：这里**不能**先喊「正在扫描局域网」——
+        // 要不要扫得等 findLanHost 里查过 isOnWiFi() 才知道。
+        // 之前把提示放在这儿，结果蜂窝下界面显示"正在扫描局域网"、实际压根没扫，
+        // 纯属骗人（用户实测反馈过）。提示现在由 findLanHost 在真正开扫时发出。
         if session.useFrp || session.useTailscale, !skipLAN,
            let lanHost = await findLanHost(portText: originalPort, session: session) {
             print("[SessionNetworking] 局域网里发现目标 \(lanHost):\(originalPort) —— 直连，跳过隧道")
@@ -589,6 +589,8 @@ class SessionNetworking {
                 print("[LanDiscovery] 缓存已失效且当前不在 WiFi —— 直接走隧道，不扫了")
                 return nil
             }
+            // ★ 确认真的要扫了才发提示 —— 放在这儿界面才不会骗人。
+            statusUpdateCallback?("正在扫描局域网，寻找可直连的设备…")
             candidates = await discoverLan(port: port)
         }
         guard !candidates.isEmpty else { return nil }

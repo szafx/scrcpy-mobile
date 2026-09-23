@@ -142,6 +142,16 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     private var pendingReconnectCheck: DispatchWorkItem?
     /// 重连进行中，避免叠加触发
     private var isAutoReconnecting = false
+    /// 上次重连的时刻 —— 用来冷却。
+    ///
+    /// ★ 为什么必须冷却：切网时 `pathUpdateHandler` 会**连着报好几次**
+    ///   （真机日志：`[pdp_ip0,en0]` → `[pdp_ip0]` → `[pdp_ip0]` …），
+    ///   每次都排一个重连任务；而一次重连要几十秒，期间的路径变化又触发新的 —
+    ///   结果就是「重连 → 失败 → 再重连」的死循环，日志里能清楚看到
+    ///   `Starting connection to session:` 反复出现。
+    private var lastReconnectAt: Date?
+    /// 重连冷却时间（秒）
+    private let reconnectCooldown: TimeInterval = 20
     /// 网络切换常常连着抖几下（WiFi→无网→蜂窝），等一下让它稳定再动手。
     ///
     /// 但**别太长** —— 这段等待里画面是冻结的、菜单点什么都没反应，
@@ -289,6 +299,22 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
 
     private func performAutoReconnect(_ session: ScrcpySessionModel) {
         guard !isAutoReconnecting else { return }
+
+        // 冷却：切网会连着报好几次路径变化，而一次重连要几十秒 ——
+        // 没有这个就会被反复触发，变成「重连 → 失败 → 再重连」的死循环。
+        if let last = lastReconnectAt, Date().timeIntervalSince(last) < reconnectCooldown {
+            let left = Int(reconnectCooldown - Date().timeIntervalSince(last))
+            print("[AutoReconnect] 距上次重连不到 \(Int(reconnectCooldown)) 秒（还差 \(left)s），跳过")
+            return
+        }
+        lastReconnectAt = Date()
+
+        // 已经在连接中就别再发起一次（重连流程本身会走到 connectToSession）
+        if isConnecting {
+            print("[AutoReconnect] 正在连接中，跳过重复触发")
+            return
+        }
+
         // 用**专门留给重连的那份**回调 —— currentConnectionCallback 在连接成功后
         // 已经被 cleanupCallbacksAfterSuccess 清成 nil 了，
         // 拿它判断会永远走到「没有可复用的回调，跳过自动重连」。
