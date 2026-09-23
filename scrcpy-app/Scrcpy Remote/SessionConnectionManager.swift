@@ -296,6 +296,40 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         //   手动断开时这个标记早就过期了。
         justHadNetworkChange = true
         justHadNetworkChangeAt = Date()
+
+        // ★★ 别干等着底层 TCP 超时。
+        //
+        //   切网之后底层连接**不会立刻断** —— 它在等 TCP 重传超时，可能几十秒。
+        //   这段时间画面冻在最后一帧、点什么都没反应（用户实测：「切换就卡在投屏页面」），
+        //   而其实早就该重连了。
+        //
+        //   所以网络一变就**主动拆**：给 2 秒缓冲（避免 WiFi 抖一下也拆），
+        //   到点如果还没走过正常的断开流程，就直接断开重连。
+        //   真的已经断了的话，那时 isAutoReconnecting 或状态早就变了，这里会自然跳过。
+        scheduleProactiveTeardown()
+    }
+
+    /// 网络刚变过之后的「主动拆连接」定时器
+    private var proactiveTeardown: DispatchWorkItem?
+
+    private func scheduleProactiveTeardown() {
+        proactiveTeardown?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // 已经断开/正在重连/正在连接 → 说明正常流程已经处理了，不用我们插手
+            guard self.connectionStatus != ScrcpyStatusDisconnected,
+                  !self.isAutoReconnecting,
+                  !self.isConnecting,
+                  self.currentSession != nil else { return }
+
+            print("[AutoReconnect] 网络已变但底层还挂着（在等 TCP 超时）—— 主动拆掉重连")
+            if let session = self.currentSession {
+                self.performAutoReconnect(session)
+            }
+        }
+        proactiveTeardown = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
     }
 
     /// 网络刚刚变化过（断开处理器据此决定要不要自动重连）。
