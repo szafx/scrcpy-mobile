@@ -128,6 +128,14 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     
     /// Scrcpy 客户端包装器实例，用于直接管理连接
     private var scrcpyClientWrapper: ScrcpyClientWrapper?
+
+    /// 当前正在跑的连接任务。
+    ///
+    /// ★ 必须能取消：用户中途点取消时，如果放任它继续跑，它会一直 await
+    ///   （局域网扫描 / frp 打洞都可能要好几秒），回来之后又把状态改一遍 ——
+    ///   结果是导航栏那两个按钮因为 isConnecting 还是 true 而一直灰着点不动，
+    ///   再点连接也会被这个残留任务搅乱。取消掉就干净了。
+    private var connectionTask: Task<Void, Never>?
     
     /// 后台断开连接计时器
     private var backgroundDisconnectTimer: Timer?
@@ -578,9 +586,17 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
             }
         }
 
-        Task {
+        // 上一轮如果还没结束（用户连点、或上次取消得不干净），先把它停掉
+        connectionTask?.cancel()
+        connectionTask = Task {
             do {
                 var connectionInfo = await SessionNetworking.shared.getConnectionInfo(for: session)
+
+                // 用户中途取消了就别再往下改状态了
+                if Task.isCancelled {
+                    print("🚫 [SessionConnectionManager] 连接任务已取消，放弃本次连接")
+                    return
+                }
                 
                 // 如果是 Tailscale / frp 连接且首次获取信息失败，则重试一次
                 // 仅当隧道本身没建起来时重试（地址填错的话重试也没用，但值得再试一次打洞）
@@ -755,6 +771,14 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     
     /// 清除当前会话信息
     func clearCurrentSession(clearPendingAction: Bool = true) {
+        // ★ 把还在跑的连接任务也停掉。
+        //
+        //   不停的话它会自己跑完再回来改状态，把这里刚清干净的
+        //   isConnecting / connectionStatus 又弄脏 —— 用户看到的就是
+        //   「取消之后导航栏两个图标一直灰着点不动，再点连接还是卡住」。
+        connectionTask?.cancel()
+        connectionTask = nil
+
         let wasConnected = currentSession != nil
         let previousHost = actualHost
         let previousPort = actualPort

@@ -21,6 +21,10 @@ import Foundation
 
 struct LanDiscovery {
 
+    /// iOS 上 WiFi 就是 en0（蜂窝是 pdp_ip*，VPN 是 utun*）。
+    /// 只扫 WiFi —— 走移动数据时根本没有「同一个局域网」可言，硬扫只会拖慢连接。
+    private static let wifiInterfaceName = "en0"
+
     /// 扫出来的候选地址（只含 adb 端口开放的主机）
     struct Candidate {
         let host: String
@@ -39,7 +43,7 @@ struct LanDiscovery {
                          batchSize: Int = 64) async -> [Candidate] {
 
         guard let subnet = localSubnet() else {
-            print("[LanDiscovery] 拿不到本机网段，跳过扫描")
+            print("[LanDiscovery] 当前不在 WiFi 上（或者拿不到网段）—— 跳过扫描，直接走隧道")
             return []
         }
 
@@ -80,9 +84,13 @@ struct LanDiscovery {
         let hosts: [String]
     }
 
-    /// 用 getifaddrs 找到本机的 IPv4 地址 + 掩码，算出同网段的其他主机。
+    /// 用 getifaddrs 找到本机 **WiFi（en0）** 接口的 IPv4 地址 + 掩码，算出同网段的其他主机。
     ///
-    /// 只看第一个「非回环、有地址、有掩码」的接口 —— iPhone 上一般就是 en0（WiFi）。
+    /// ★★ 只认 en0，其它接口一律跳过 —— 尤其是蜂窝（pdp_ip*）：
+    ///   切到移动数据后，如果拿蜂窝地址去扫，就是在**移动网络上**扫 253 个地址，
+    ///   每个都等到超时，连接会被拖到看起来卡死（用户实测：WiFi 关掉后点连接，
+    ///   一直卡在 preparing connection）。而且那条路上根本不可能有手机，
+    ///   纯属白费 —— 扫不到就老老实实走隧道才对。
     private static func localSubnet(hostLimit: Int = 1024) -> Subnet? {
         var ifaddrPtr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else { return nil }
@@ -96,8 +104,9 @@ struct LanDiscovery {
             let isUp = (flags & IFF_UP) != 0
             let isLoopback = (flags & IFF_LOOPBACK) != 0
             let family = current.pointee.ifa_addr?.pointee.sa_family
+            let name = current.pointee.ifa_name.map { String(cString: $0) } ?? ""
 
-            if isUp, !isLoopback, family == UInt8(AF_INET),
+            if isUp, !isLoopback, family == UInt8(AF_INET), name == wifiInterfaceName,
                let addr = current.pointee.ifa_addr,
                let mask = current.pointee.ifa_netmask {
 
@@ -106,7 +115,7 @@ struct LanDiscovery {
 
                 if let ip, let netmask, let subnet = makeSubnet(ip: ip, netmask: netmask, hostLimit: hostLimit) {
                     result = subnet
-                    break   // 第一个可用的就够（en0 通常排在前面）
+                    break
                 }
             }
             cursor = current.pointee.ifa_next
