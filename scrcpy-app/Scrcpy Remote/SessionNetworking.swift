@@ -473,7 +473,7 @@ class SessionNetworking {
         let size = (try? handle.seekToEnd()) ?? 0
         let offset = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
         try? handle.seek(toOffset: offset)
-        guard let data = try? handle.readToEnd(), let data else { return nil }
+        guard let data = try? handle.readToEnd() else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
