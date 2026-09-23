@@ -386,6 +386,13 @@ class SessionNetworking {
     /// 上次扫描的结果和时刻。扫一遍网段要 1~2 秒，不能每次连接都扫。
     private var lanScanCache: [LanDiscovery.Candidate] = []
     private var lanScanAt: Date?
+    /// 正在跑的扫描任务 —— 预热和连接时都可能触发，复用它避免并发扫两次
+    private var lanScanTask: Task<[LanDiscovery.Candidate], Never>?
+
+    /// 会话 → 上次成功连上的局域网地址。
+    /// 认过一次就记住，别再查 —— 查序列号要 adb connect 走一遍授权握手
+    /// （offline → authorizing → device），又慢又会让设备表短暂变脏。
+    private var sessionLanHosts: [UUID: String] = [:]
     /// 缓存有效期 —— 过期就重扫（手机换了 IP、或者换了 WiFi）
     private let lanScanTTL: TimeInterval = 300
 
@@ -396,10 +403,15 @@ class SessionNetworking {
 
     /// 返回局域网里属于**这台设备**的地址；不在局域网（或认不出来）就返回 nil。
     ///
-    /// 多设备匹配（局域网里可能同时有好几台手机）：
-    ///   1. 只有一台候选 → 直接用它（没有歧义）
-    ///   2. 多台 → 逐个用 adb 连上去读序列号，和会话 frp proxy 名里的序号段对上才算
-    ///   3. 认不出来 → 返回 nil，**不猜**，让调用方落到 frp/Tailscale
+    /// 匹配顺序（快的在前，慢的兜底）：
+    ///   1. **这个会话上次连过的地址**还在候选里 → 直接用（零额外开销）
+    ///   2. 只有一台候选 → 直接用（没有歧义）
+    ///   3. 多台 → 逐个用 adb 连上去读序列号，和会话 frp proxy 名里的序号段对上才算
+    ///   4. 认不出来 → 返回 nil，**不猜**，让调用方落到 frp/Tailscale
+    ///
+    /// ★ 为什么第 1 条这么重要：读序列号要 `adb connect`，而每次 connect 都要走一遍
+    ///   `offline → authorizing → device` 的授权握手，慢，还会让 adb 设备表短暂变脏
+    ///   （并发跑更糟，经常读到空的序列号导致匹配失败）。所以认过一次就记下来。
     private func findLanHost(portText: String, session: ScrcpySessionModel) async -> String? {
         guard let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return nil }
 
@@ -429,16 +441,33 @@ class SessionNetworking {
         }
         guard !candidates.isEmpty else { return nil }
 
-        if candidates.count == 1 {
-            return candidates.first?.host
+        // ① 这个会话上次连过的地址，只要还在候选里就直接用
+        if let remembered = sessionLanHosts[session.id],
+           candidates.contains(where: { $0.host == remembered }) {
+            print("[LanDiscovery] 用这个会话上次的地址：\(remembered)")
+            return remembered
         }
 
-        // 多台：逐个查序列号认人
+        // ② 只有一台，不用问
+        if candidates.count == 1 {
+            let host = candidates[0].host
+            sessionLanHosts[session.id] = host
+            return host
+        }
+
+        // ③ 多台：逐个查序列号认人（慢，但结果会记住）
         print("[LanDiscovery] 局域网里有 \(candidates.count) 台，逐个查序列号匹配…")
-        return await matchTargetDevice(candidates, session: session, port: port)
+        let matched = await matchTargetDevice(candidates, session: session, port: port)
+        if let matched {
+            sessionLanHosts[session.id] = matched
+        }
+        return matched
     }
 
     /// 逐个 adb 连上去读序列号，找出哪一台是会话要的那台。
+    ///
+    /// ★ 串行跑，别并发：几次并发 adb connect/查询会互相干扰（设备状态在 offline →
+    ///   authorizing → device 之间跳），实测经常读到空序列号，白白判成「没有一台匹配」。
     ///
     /// 判据用的是 **frp proxy 名的最后一段**（部署脚本 deploy-frpc.py 的命名规则：
     /// `phone-<型号>-<序列号后4位>`），所以会话必须填过 frpProxyName。
@@ -451,26 +480,16 @@ class SessionNetworking {
             return nil
         }
 
-        let matched = await withTaskGroup(of: (String, String?).self) { group -> String? in
-            for candidate in candidates {
-                group.addTask {
-                    (candidate.host, await Self.readSerialNumber(host: candidate.host, port: port))
-                }
+        for candidate in candidates {
+            let serial = await Self.readSerialNumber(host: candidate.host, port: port)
+            if let serial, serial.hasSuffix(suffix) {
+                print("[LanDiscovery] 匹配到目标设备：\(candidate.host)（序列号后缀 \(suffix)）")
+                return candidate.host
             }
-            for await (host, serial) in group {
-                if let serial, serial.hasSuffix(suffix) {
-                    return host
-                }
-            }
-            return nil
         }
 
-        if let matched {
-            print("[LanDiscovery] 匹配到目标设备：\(matched)（序列号后缀 \(suffix)）")
-        } else {
-            print("[LanDiscovery] \(candidates.count) 台里没有一台匹配后缀 \(suffix)")
-        }
-        return matched
+        print("[LanDiscovery] \(candidates.count) 台里没有一台匹配后缀 \(suffix)")
+        return nil
     }
 
     /// 从 `phone-COR-AL10-1911` 里取出 `1911`
@@ -514,7 +533,18 @@ class SessionNetworking {
         if let scannedAt = lanScanAt, Date().timeIntervalSince(scannedAt) < lanScanTTL, !lanScanCache.isEmpty {
             return lanScanCache
         }
-        let found = await LanDiscovery.discover(port: port)
+
+        // ★ 已经有扫描在跑就复用它，别再起一个。
+        //   预热扫描（App 启动时）和这里的调用会撞车：两个并发跑的话，
+        //   既浪费，也会让 adb 设备表被临时连接污染两次（push 会失败）。
+        if let running = lanScanTask {
+            return await running.value
+        }
+
+        let task = Task { await LanDiscovery.discover(port: port) }
+        lanScanTask = task
+        let found = await task.value
+        lanScanTask = nil
         lanScanCache = found
         lanScanAt = Date()
         return found
