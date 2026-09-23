@@ -18,69 +18,31 @@ import SwiftUI
 struct LatencyBadgeView: View {
 
     @ObservedObject private var monitor = LatencyMonitor.shared
-    @ObservedObject private var manager = SessionConnectionManager.shared
-
-    /// 展开态显示抖动 + 实际地址；默认收起，只占一行
-    @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            // 横幅优先：重连之类的临时状态压过常规读数
-            // （重连时投屏画面是冻结的，SwiftUI 的状态界面又被 SDL 窗口盖住，
-            //   只有这个浮层能告诉用户「正在发生什么」）
-            if let banner = monitor.banner {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                        .frame(width: 10, height: 10)
-                    Text(banner)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.primary)
-                        .lineLimit(2)
-                }
-            } else {
-                HStack(spacing: 6) {
-                    // 圆点按延迟分档上色，瞟一眼就知道好不好
-                    Circle()
-                        .fill(latencyColor)
-                        .frame(width: 7, height: 7)
+        HStack(spacing: 5) {
+            // 圆点按延迟分档上色，瞟一眼就知道好不好
+            Circle()
+                .fill(latencyColor)
+                .frame(width: 6, height: 6)
 
-                    Text(monitor.kind.label)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.primary)
+            Text(monitor.kind.label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.primary)
 
-                    Text(latencyText)
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundColor(latencyColor)
-                }
-            }
-
-            if expanded && monitor.banner == nil {
-                if let jitter = monitor.jitterMs {
-                    Text(String(format: "抖动 ±%.0f ms", jitter))
-                        .font(.system(size: 10).monospacedDigit())
-                        .foregroundColor(.secondary)
-                }
-                if let host = manager.actualHost, let port = manager.actualPort {
-                    Text("\(host):\(port)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
-            }
+            Text(latencyText)
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .foregroundColor(latencyColor)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        // 做得尽量小 —— 它浮在投屏画面上，面积越大越挡视线。
+        // （整窗已经不吃触摸了，所以不用担心"挡住按不了"，但少占地方总是好的。）
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial, in: Capsule())
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+            Capsule().stroke(Color.white.opacity(0.15), lineWidth: 0.5)
         )
-        .shadow(color: .black.opacity(0.25), radius: 4, y: 1)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() }
-        }
+        .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
         .onAppear { monitor.start() }
         .onDisappear { monitor.stop() }
     }

@@ -129,33 +129,27 @@ final class LatencyBadgeWindow {
     }
 }
 
-/// 只让**右上角气泡那一小块矩形**吃触摸，其余位置一律放行给下面的投屏窗口。
+/// 整个窗口**完全不吃触摸** —— 所有事件一律放行给下面的投屏窗口。
 ///
-/// ★★ 这里踩过一个坑，别再改回去：
-///   宿主视图是个**撑满全屏**的 VStack（用 Spacer 把气泡推到右上角），
-///   所以点击落在空白处时，`super.hitTest` 命中的是那个全屏容器、
-///   而不是"最外层 view" —— 之前按 `hit === rootViewController?.view` 判断，
-///   结果整屏的触摸都被这个透明窗口吃掉，投屏**完全点不动**，
-///   只有气泡自己能点。用户实测：「无法点击，无法控制，只有右上角的延迟能点」。
+/// ★★ 这里踩过两次坑，最后选择了"不要交互"这条路：
 ///
-///   改成按**坐标矩形**判断最稳妥：只有点在右上角那块才响应。
+///   坑一（吃全屏）：宿主是个撑满全屏的 VStack（用 Spacer 把气泡推到右上角），
+///   点击落在空白处时 `super.hitTest` 命中的是那个全屏容器而不是最外层 view，
+///   按 `hit === rootViewController?.view` 判断的结果是——整屏触摸都被吃掉，
+///   投屏**完全点不动**（用户实测：「无法点击，无法控制，只有右上角的延迟能点」）。
+///
+///   坑二（隐形区域）：改成按坐标矩形判断后，矩形写成了 170×130，
+///   而气泡实际只有约 110×30 —— 于是气泡周围一大片**看不见的地方**也在吃触摸，
+///   用户按不到底下投屏画面里的控件（「有些手机界面位置按不了」）。
+///
+///   根子在于"算了半天谁该吃事件"这件事本身就不该做 ——
+///   气泡只是**看**的，不需要点。所以整窗关掉交互，一劳永逸：
+///   不存在"挡住按不了"，也不存在"算错矩形"。
+///
+///   代价：气泡上的展开功能也没了（那个是我加的多余功能，已一并去掉）。
 private final class PassthroughWindow: UIWindow {
-
-    /// 气泡在窗口坐标系里占的矩形（比气泡本身放大一圈，兼顾展开态）
-    private var badgeRect: CGRect {
-        let width: CGFloat = 170
-        let height: CGFloat = 130
-        let topInset = windowScene?.statusBarManager?.statusBarFrame.height ?? 44
-        return CGRect(x: bounds.width - width - 10,
-                      y: topInset,
-                      width: width,
-                      height: height)
-    }
-
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        // 不在气泡范围内 —— 直接返回 nil，事件继续传给下面的投屏窗口
-        guard badgeRect.contains(point) else { return nil }
-        return super.hitTest(point, with: event)
+        return nil
     }
 }
 
