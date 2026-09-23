@@ -994,6 +994,15 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     
     /// 清除当前会话信息
     func clearCurrentSession(clearPendingAction: Bool = true) {
+        // ★ 留一道追踪：**会话被清 = 界面要回主页**，这是「切网后莫名回主页」
+        //   这类问题的总开关。全代码库只有两个调用点（Disconnected 处理器、
+        //   disconnectCurrent），都该在自动重连期间被跳过 ——
+        //   万一将来又冒出一条新路径，这行会让它当场现形，
+        //   不用像之前那样靠翻几百行日志猜。
+        if isAutoReconnecting {
+            print("⚠️ [AutoReconnect] 重连期间会话被清！调用方：\(Thread.callStackSymbols.prefix(4).joined(separator: " <- "))")
+        }
+
         // ★ 把还在跑的连接任务也停掉。
         //
         //   不停的话它会自己跑完再回来改状态，把这里刚清干净的
