@@ -413,9 +413,16 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         // 所以 WiFi 走到蜂窝会自动落到 frp，走回来又会自动回到局域网。
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self else { return }
-            self.isAutoReconnecting = false
-            // 标记这次连接来自自动重连 —— connectToSession 据此跳过「先断开」那步，
-            // 免得又调 clearCurrentSession() 把界面踢回主页。
+            // ★★ 这里**不能**把 isAutoReconnecting 清掉。
+            //
+            //   重连要先拆旧连接，而旧连接真正发 Disconnected 通知是**滞后**到达的 ——
+            //   如果这儿就把标志清了，那个迟到的通知会被当成「普通断开」，
+            //   走到 clearCurrentSession() 把会话清掉、界面回主页。
+            //   真机日志实锤：Starting connection 之后紧跟着
+            //   'Session cleared - was connected to home.szafx.icu:6001'。
+            //
+            //   所以让它一直为 true，直到这次连接**结束**（成功或失败）再清 ——
+            //   见 Connected / ConnectingFailed 分支里的复位。
             self.isReconnecting = true
             self.connectToSession(session, statusCallback: statusCallback, errorCallback: errorCallback)
         }
@@ -490,6 +497,8 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                     self.cleanupCallbacksAfterSuccess()
                 }
+                // 这次重连结束了 —— 复位标志，之后的断开又该按正常流程处理
+                self.isAutoReconnecting = false
                 
             case ScrcpyStatusDisconnected:
                 print("❌ [SessionConnectionManager] Status: Disconnected - clearing session")
@@ -555,6 +564,8 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
             case ScrcpyStatusConnectingFailed:
                 print("❌ [SessionConnectionManager] Status: Connection Failed")
                 self.isConnecting = false
+                // 这次重连也结束了（失败）—— 复位标志，别让它一直卡在 true
+                self.isAutoReconnecting = false
 
                 // ★ 局域网直连失败 → 自动改走隧道再试一次。
                 //
