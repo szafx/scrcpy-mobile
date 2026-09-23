@@ -393,7 +393,7 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 //
                 //   只回落一次（skipLANOnNextAttempt 会让下次连接跳过局域网那一级），
                 //   避免失败-回落-再失败来回循环。
-                if SessionNetworking.shared.lastAttemptWasLAN, !isAutoReconnecting {
+                if SessionNetworking.shared.lastAttemptWasLAN, !self.isAutoReconnecting {
                     print("[AutoReconnect] 局域网直连失败 —— 自动改走隧道重试一次")
                     SessionNetworking.shared.skipLANOnNextAttempt()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
