@@ -72,15 +72,33 @@ final class LatencyBadgeWindow {
     }
 }
 
-/// 只让气泡那一小块吃触摸，其余位置穿透给下面的投屏窗口。
+/// 只让**右上角气泡那一小块矩形**吃触摸，其余位置一律放行给下面的投屏窗口。
 ///
-/// 判据：`super.hitTest` 返回的如果是**透传容器本身**（rootViewController.view），
-/// 说明这个点没落在气泡上 —— 这时返回 nil，事件就会继续传给下层窗口。
-/// 落在气泡上时返回的是气泡内部的视图，正常响应。
+/// ★★ 这里踩过一个坑，别再改回去：
+///   宿主视图是个**撑满全屏**的 VStack（用 Spacer 把气泡推到右上角），
+///   所以点击落在空白处时，`super.hitTest` 命中的是那个全屏容器、
+///   而不是"最外层 view" —— 之前按 `hit === rootViewController?.view` 判断，
+///   结果整屏的触摸都被这个透明窗口吃掉，投屏**完全点不动**，
+///   只有气泡自己能点。用户实测：「无法点击，无法控制，只有右上角的延迟能点」。
+///
+///   改成按**坐标矩形**判断最稳妥：只有点在右上角那块才响应。
 private final class PassthroughWindow: UIWindow {
+
+    /// 气泡在窗口坐标系里占的矩形（比气泡本身放大一圈，兼顾展开态）
+    private var badgeRect: CGRect {
+        let width: CGFloat = 170
+        let height: CGFloat = 130
+        let topInset = windowScene?.statusBarManager?.statusBarFrame.height ?? 44
+        return CGRect(x: bounds.width - width - 10,
+                      y: topInset,
+                      width: width,
+                      height: height)
+    }
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard let hit = super.hitTest(point, with: event) else { return nil }
-        return hit === rootViewController?.view ? nil : hit
+        // 不在气泡范围内 —— 直接返回 nil，事件继续传给下面的投屏窗口
+        guard badgeRect.contains(point) else { return nil }
+        return super.hitTest(point, with: event)
     }
 }
 

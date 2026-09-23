@@ -221,6 +221,11 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     /// 没有这个监听的话，画面会**静默卡死**，用户只能自己断开重连。
     private func setupPathMonitor() {
         pathMonitor.pathUpdateHandler = { [weak self] path in
+            // ★ 无论当前有没有活动连接，都要把最新的路径状态喂给 LanDiscovery。
+            //   不然「开着 WiFi 进 App、之后再切网」时，判断依据会一直是旧的 ——
+            //   这正是用户反馈的「App 没法实时识别 WiFi 和蜂窝状态」。
+            LanDiscovery.updatePath(path)
+
             DispatchQueue.main.async {
                 self?.handlePathChange(path)
             }

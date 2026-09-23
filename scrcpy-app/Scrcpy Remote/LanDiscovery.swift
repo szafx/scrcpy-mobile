@@ -19,6 +19,7 @@
 
 import Darwin
 import Foundation
+import Network
 
 struct LanDiscovery {
 
@@ -43,8 +44,8 @@ struct LanDiscovery {
                          timeout: TimeInterval = 0.5,
                          batchSize: Int = 64) async -> [Candidate] {
 
-        guard let subnet = localSubnet() else {
-            print("[LanDiscovery] 当前不在 WiFi 上（或者拿不到网段）—— 跳过扫描，直接走隧道")
+        guard let subnet = localSubnet(), isOnWiFi() else {
+            print("[LanDiscovery] 当前不是 WiFi（或拿不到网段）—— 跳过扫描，直接走隧道")
             return []
         }
 
@@ -87,13 +88,35 @@ struct LanDiscovery {
 
     /// 用 getifaddrs 找到本机 **WiFi（en0）** 接口的 IPv4 地址 + 掩码，算出同网段的其他主机。
     ///
-    /// 当前连着 WiFi 吗（能拿到 WiFi 接口的网段）。
+    /// 当前是不是真的走 WiFi（**系统当前首选路径是 WiFi**，且拿得到网段）。
     ///
-    /// 用它来决定「要不要扫局域网」—— 在蜂窝上扫 253 个地址纯属白等，
-    /// 移动网络下每个地址都要等到超时。
+    /// ★★ 为什么不能只用 getifaddrs：
+    ///   **iOS 关 WiFi 时网卡不会立刻消失** —— 系统是"慢慢退出"的，
+    ///   关的时候还会提示「附近的无线网局域网连接会在明天之前保持断开状态」，
+    ///   那是 iOS 主动记住了"用户断开了这个网络"。
+    ///   这段时间里 getifaddrs 仍然能看到 en0 和它的地址，于是 App 以为还在局域网、
+    ///   拿着旧地址去连，白等一场（用户实测：切蜂窝 5 秒后点连接仍然在扫局域网）。
+    ///
+    ///   NWPathMonitor 反映的是**系统当前的网络路径**，比"网卡还在不在"准得多，
+    ///   所以由 SessionConnectionManager 的监听器实时把状态喂进来。
+    ///
+    /// 两个判据都要满足才是"在 WiFi"：系统说是 WiFi，并且确实拿得到网段。
     static func isOnWiFi() -> Bool {
-        localSubnet() != nil
+        pathLock.lock()
+        let viaPath = pathUsesWiFi
+        pathLock.unlock()
+        return viaPath && localSubnet() != nil
     }
+
+    /// 由 SessionConnectionManager 的 NWPathMonitor 回调，实时更新。
+    static func updatePath(_ path: NWPath) {
+        pathLock.lock()
+        pathUsesWiFi = path.usesInterfaceType(.wifi)
+        pathLock.unlock()
+    }
+
+    private static var pathUsesWiFi = false
+    private static let pathLock = NSLock()
 
     /// ★★ 只认 en0，其它接口一律跳过 —— 尤其是蜂窝（pdp_ip*）：
     ///   切到移动数据后，如果拿蜂窝地址去扫，就是在**移动网络上**扫 253 个地址，
