@@ -456,6 +456,20 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 self.checkForErrorsAndShowAlert()
                 
                 self.isConnecting = false
+
+                // ★★ 自动重连期间**绝不清会话** —— 否则界面立刻回主页。
+                //
+                //   这是「卡一会直接回到主页」的真正元凶：重连时底层必然会先断一次，
+                //   底层一断就发 Disconnected 通知，走到这里 clearCurrentSession()，
+                //   会话被清成 nil，UI 就没得显示、只能回主页。
+                //   （前面绕过了 disconnectCurrent() 里的清理，但漏了这个通知处理器。）
+                //
+                //   重连是**原地重建**，会话本身一点没变，不该被清掉。
+                if self.isAutoReconnecting {
+                    print("[AutoReconnect] 重连期间收到 Disconnected —— 保留会话，不回主页")
+                    break
+                }
+
                 // 如果正在执行带 action 的连接，不清除 pendingAction
                 self.clearCurrentSession(clearPendingAction: !self.isConnectingWithAction)
                 
