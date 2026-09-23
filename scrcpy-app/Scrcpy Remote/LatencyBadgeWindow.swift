@@ -55,9 +55,8 @@ final class LatencyBadgeWindow {
         newWindow.windowLevel = .normal + 1
         newWindow.backgroundColor = .clear
         newWindow.isOpaque = false
-        // 气泡本身要能点（点开看抖动和目标地址），
-        // 但**只有气泡那一小块**吃事件，其余全部穿透给下面的投屏窗口 ——
-        // 具体由 PassthroughWindow.hitTest 控制。
+        // 要能拖，所以开着交互 —— 但**只有气泡那一小块**真的吃事件，
+        // 其余全部穿透给投屏窗口，具体由 PassthroughWindow.hitTest 控制。
         newWindow.isUserInteractionEnabled = true
         newWindow.rootViewController = UIHostingController(rootView: LatencyBadgeHost())
         newWindow.rootViewController?.view.backgroundColor = .clear
@@ -129,9 +128,9 @@ final class LatencyBadgeWindow {
     }
 }
 
-/// 整个窗口**完全不吃触摸** —— 所有事件一律放行给下面的投屏窗口。
+/// 只让**气泡当前占的那块**吃触摸，其余位置一律放行给下面的投屏窗口。
 ///
-/// ★★ 这里踩过两次坑，最后选择了"不要交互"这条路：
+/// ★★ 这里踩过两次坑，现在的做法是第三次：
 ///
 ///   坑一（吃全屏）：宿主是个撑满全屏的 VStack（用 Spacer 把气泡推到右上角），
 ///   点击落在空白处时 `super.hitTest` 命中的是那个全屏容器而不是最外层 view，
@@ -142,22 +141,35 @@ final class LatencyBadgeWindow {
 ///   而气泡实际只有约 110×30 —— 于是气泡周围一大片**看不见的地方**也在吃触摸，
 ///   用户按不到底下投屏画面里的控件（「有些手机界面位置按不了」）。
 ///
-///   根子在于"算了半天谁该吃事件"这件事本身就不该做 ——
-///   气泡只是**看**的，不需要点。所以整窗关掉交互，一劳永逸：
-///   不存在"挡住按不了"，也不存在"算错矩形"。
-///
-///   代价：气泡上的展开功能也没了（那个是我加的多余功能，已一并去掉）。
+///   现在的做法：矩形**由视图实时上报**（BadgePosition.hitFrame），
+///   而不是在窗口里猜。这样：
+///     - 拖动气泡 → 矩形跟着动 → 拖到哪儿就在哪儿能抓住
+///     - 气泡很小 → 矩形就小 → 不挡操作
+///   而且只在这个矩形内才吃触摸，其余全部穿透。
 private final class PassthroughWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        return nil
+        let frame = BadgePosition.shared.hitFrame
+        guard !frame.isEmpty, frame.contains(point) else { return nil }
+        return super.hitTest(point, with: event)
     }
 }
 
-/// 气泡的摆放：贴右上角，留出安全区。
+/// 气泡的摆放：默认贴右上角，**可以拖到任意位置**。
 ///
-/// 注意这里**不能**加 `.allowsHitTesting(false)` —— 那会让气泡点不动。
-/// 触摸要不要穿透由 PassthroughWindow.hitTest 统一决定。
+/// 拖动的意义不只是"挪开" —— 它和"不吃触摸"这件事是配套的：
+/// 气泡平时只吃自己那块（不挡操作），你要动它时按住它就行。
+///
+/// 位置存盘（BadgePosition），下次进来还在你放的地方。
+///
+/// ★ 这里还负责**把气泡的实时矩形上报给窗口**（BadgePosition.hitFrame）——
+///   窗口的 hitTest 只看这块矩形，所以拖到哪儿就在哪儿能抓住。
 private struct LatencyBadgeHost: View {
+
+    @ObservedObject private var badge = BadgePosition.shared
+
+    /// 拖动过程中的临时累加，抬手时才落到 badge.offset（避免频繁写盘）
+    @State private var dragTranslation: CGSize = .zero
+
     var body: some View {
         VStack {
             HStack {
@@ -165,8 +177,48 @@ private struct LatencyBadgeHost: View {
                 LatencyBadgeView()
                     .padding(.trailing, 10)
                     .padding(.top, 4)
+                    .offset(x: badge.offset.width + dragTranslation.width,
+                            y: badge.offset.height + dragTranslation.height)
+                    .background(
+                        // 把气泡当前的屏幕矩形报出去 —— 窗口的 hitTest 要用
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: BadgeFrameKey.self,
+                                value: geo.frame(in: .global)
+                            )
+                        }
+                    )
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                dragTranslation = value.translation
+                            }
+                            .onEnded { value in
+                                badge.offset = CGSize(
+                                    width: badge.offset.width + value.translation.width,
+                                    height: badge.offset.height + value.translation.height
+                                )
+                                dragTranslation = .zero
+                                badge.save()
+                            }
+                    )
             }
             Spacer()
         }
+        .onPreferenceChange(BadgeFrameKey.self) { frame in
+            // 往外扩一点当抓取区：视觉上小巧，但手指按得中
+            BadgePosition.shared.hitFrame = frame.insetBy(
+                dx: -BadgePosition.grabMargin,
+                dy: -BadgePosition.grabMargin
+            )
+        }
+    }
+}
+
+/// 用来把气泡的屏幕矩形从视图里传出来
+private struct BadgeFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
     }
 }
