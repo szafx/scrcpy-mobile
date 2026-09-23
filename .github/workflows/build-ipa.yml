@@ -21,6 +21,14 @@ on:
   push:
     branches: [ main ]
 
+# ★ 同一分支只留最新一轮。
+#   之前没配这个，连续推几个提交就会有好几个 job 同时在编（每个 ~10 分钟、还白占
+#   macOS runner 额度），得手动去停。开 cancel-in-progress 之后，
+#   新的提交一推，旧的自动取消 —— 反正新提交的内容包含旧的。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # CMake 4.x 对 lz4/zstd 这些老库兼容性差，官方逃生阀
   CMAKE_POLICY_VERSION_MINIMUM: '3.5'
