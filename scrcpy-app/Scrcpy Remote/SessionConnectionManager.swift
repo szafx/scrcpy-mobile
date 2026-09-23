@@ -17,6 +17,7 @@
 //  - 提高了代码的可维护性、可测试性和架构一致性
 
 import Foundation
+import Network
 import UIKit
 import ActivityKit
 
@@ -118,6 +119,17 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     
     /// 当前错误回调闭包
     private var currentErrorCallback: ConnectionErrorCallback?
+
+    // MARK: - 网络变化 → 自动重连（相关状态）
+
+    /// 监听网络路径变化：切 WiFi、切蜂窝、掉线重连都会触发
+    private let pathMonitor = NWPathMonitor()
+    /// 待执行的重连检查（网络抖动时会被取消重排）
+    private var pendingReconnectCheck: DispatchWorkItem?
+    /// 重连进行中，避免叠加触发
+    private var isAutoReconnecting = false
+    /// 网络切换常常连着抖几下（WiFi→无网→蜂窝），先等它稳定
+    private let reconnectDebounce: TimeInterval = 3.0
     
     /// 当前 Action 确认回调闭包
     private var currentActionConfirmationCallback: ActionConfirmationCallback?
@@ -155,6 +167,7 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     override private init() {
         super.init()
         setupNotificationObservers()
+        setupPathMonitor()
     }
     
     // MARK: - Notification Observers
@@ -196,6 +209,92 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     @objc private func handleApplicationWillEnterForeground() {
         // Earliest foreground signal — clear the background flag right away.
         SetApplicationBackgroundState(false)
+    }
+
+    // MARK: - 网络变化 → 自动重连
+
+    /// 起一个网络路径监听器。
+    ///
+    /// 为什么必须有它：**切网（WiFi↔蜂窝）会让已建立的 TCP 连接全部作废**，
+    /// 因为源地址变了、对端不再认得这条连接。这一步跟走局域网还是隧道无关 ——
+    /// frp 会重建自己的隧道、tsnet 也会重连，但**上面那层 adb 连接**断了就是断了。
+    /// 没有这个监听的话，画面会**静默卡死**，用户只能自己断开重连。
+    private func setupPathMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                self?.handlePathChange(path)
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "com.scrcpy.pathmonitor"))
+    }
+
+    private func handlePathChange(_ path: NWPath) {
+        // 没有活动连接就无所谓
+        guard currentSession != nil, connectionStatus != ScrcpyStatusDisconnected else { return }
+
+        let interfaces = path.availableInterfaces.map { $0.name }.joined(separator: ",")
+        print("[AutoReconnect] 网络路径变化：\(path.status == .satisfied ? "可用" : "不可用")，接口 [\(interfaces)]")
+
+        // 防抖：切网往往会连着抖几下（WiFi → 无网 → 蜂窝），等稳定了再判断
+        pendingReconnectCheck?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.verifyConnectionAndReconnectIfNeeded()
+        }
+        pendingReconnectCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + reconnectDebounce, execute: work)
+    }
+
+    /// 网络变了之后，确认一下当前连接是不是真的断了；断了就自动重连。
+    private func verifyConnectionAndReconnectIfNeeded() {
+        guard !isAutoReconnecting,
+              let session = currentSession,
+              let host = actualHost,
+              let portText = actualPort,
+              let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else {
+            return
+        }
+
+        // ★ 判据必须是「真实往返」，不能是连接状态 ——
+        //   切网后旧连接可能还"看起来"在（尤其是 WiFi→蜂窝 的瞬间），
+        //   但包已经出不去了。只有真的发一次、等到对端反应才算数。
+        //
+        // 测量是阻塞的 socket 调用，放后台队列；结果回主线程再动连接。
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let stillAlive = LanDiscovery.measureRoundTrip(host: host, port: port, timeout: 2.0) != nil
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if stillAlive {
+                    print("[AutoReconnect] 网络变了但连接还通，保持不动")
+                    return
+                }
+                self.performAutoReconnect(session)
+            }
+        }
+    }
+
+    private func performAutoReconnect(_ session: ScrcpySessionModel) {
+        guard !isAutoReconnecting else { return }
+        guard let statusCallback = currentConnectionCallback,
+              let errorCallback = currentErrorCallback else {
+            print("[AutoReconnect] 没有可复用的回调，跳过自动重连")
+            return
+        }
+
+        isAutoReconnecting = true
+        print("[AutoReconnect] 连接已断（网络切换导致），自动重连…")
+        statusCallback(ScrcpyStatusConnecting, "网络已切换，正在重连…", true)
+
+        disconnectCurrent()
+        // 给底层一点时间收尾：frp 隧道、tsnet 转发都要清理干净再重来，
+        // 否则新连接可能接到半死不活的旧隧道上。
+        //
+        // 重连会重新走一遍「局域网优先、否则隧道」的判定 ——
+        // 所以 WiFi 走到蜂窝会自动落到 frp，走回来又会自动回到局域网。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self else { return }
+            self.isAutoReconnecting = false
+            self.connectToSession(session, statusCallback: statusCallback, errorCallback: errorCallback)
+        }
     }
     
     @objc private func handleScrcpyStatusUpdate(_ notification: Notification) {

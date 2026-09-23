@@ -215,6 +215,12 @@ struct LanDiscovery {
 
     private static func setFd(_ fd: Int32, _ set: inout fd_set) {
         let offset = Int(fd / 32)
+        // fds_bits 只有 32 个槽（select 的 FD_SETSIZE = 1024）。
+        // 越界写会直接把进程写崩 —— 宁可这次不监听到，也不能出事。
+        guard offset >= 0, offset < 32 else {
+            print("[LanDiscovery] fd \(fd) 超出 fd_set 容量，跳过（不该发生，发生了说明有 fd 泄漏）")
+            return
+        }
         let mask = Int32(1 << (fd % 32))
         withUnsafeMutablePointer(to: &set.fds_bits) { ptr in
             ptr.withMemoryRebound(to: Int32.self, capacity: 32) { raw in
