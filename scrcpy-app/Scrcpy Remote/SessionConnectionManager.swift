@@ -261,8 +261,21 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     }
 
     private func handlePathChange(_ path: NWPath) {
-        // 没有活动连接就无所谓
-        guard currentSession != nil, connectionStatus != ScrcpyStatusDisconnected else { return }
+        // ★ 只有「当前真的连着」的时候，网络变化才值得自动重连。
+        //
+        //   之前的条件是「有会话 && 不是 Disconnected」，太宽了 —— 于是：
+        //     切网 → 连接断 → 重连（合理）
+        //     重连失败 → 回主页，状态变成 Connection Failed
+        //     网络又报一次变化 → 又满足条件 → 又重连 …
+        //   变成「失败 → 回主页 → 自动重连 → 又失败」的死循环
+        //   （用户实测：「连接失败回到主页之后自己又重连了」，只有手动点取消才停）。
+        //
+        //   现在的判据是「连接本来是好的」：一旦处于连接中/失败态，就不该再触发。
+        guard currentSession != nil,
+              connectionStatus == ScrcpyStatusConnected
+                || connectionStatus == ScrcpyStatusSDLWindowAppeared,
+              !isConnecting,
+              !isAutoReconnecting else { return }
 
         let interfaces = path.availableInterfaces.map { $0.name }.joined(separator: ",")
         print("[AutoReconnect] 网络路径变化：\(path.status == .satisfied ? "可用" : "不可用")，接口 [\(interfaces)]")
