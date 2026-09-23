@@ -215,9 +215,9 @@ struct LanDiscovery {
         addr.sin_port = port.bigEndian
         guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return false }
 
-        let connectResult = withUnsafePointer(to: &storage) {
+        let connectResult = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, addrLen)
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
 
@@ -322,9 +322,9 @@ struct LanDiscovery {
         let flags = fcntl(fd, F_GETFL, 0)
         guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0 else { return nil }
 
-        let connectResult = withUnsafePointer(to: &addr) {
+        let connectResult = withUnsafePointer(to: &storage) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                connect(fd, $0, addrLen)
             }
         }
 
