@@ -87,6 +87,14 @@ struct LanDiscovery {
 
     /// 用 getifaddrs 找到本机 **WiFi（en0）** 接口的 IPv4 地址 + 掩码，算出同网段的其他主机。
     ///
+    /// 当前连着 WiFi 吗（能拿到 WiFi 接口的网段）。
+    ///
+    /// 用它来决定「要不要扫局域网」—— 在蜂窝上扫 253 个地址纯属白等，
+    /// 移动网络下每个地址都要等到超时。
+    static func isOnWiFi() -> Bool {
+        localSubnet() != nil
+    }
+
     /// ★★ 只认 en0，其它接口一律跳过 —— 尤其是蜂窝（pdp_ip*）：
     ///   切到移动数据后，如果拿蜂窝地址去扫，就是在**移动网络上**扫 253 个地址，
     ///   每个都等到超时，连接会被拖到看起来卡死（用户实测：WiFi 关掉后点连接，
@@ -233,15 +241,15 @@ struct LanDiscovery {
 
     /// 测一次到目标的往返延迟（毫秒）。连不上返回 nil。
     ///
-    /// ★ 为什么不用工程里现成的 TCPLatencyTester：
-    ///   它的逻辑是「发数据 → **等对方回数据**」。但这里的目标是 adbd，
-    ///   adbd 收到非 adb 协议的字节只会**直接关连接、不吐任何内容**，
-    ///   所以永远等不到响应 —— 实测每 2 秒一次、全报 "Failed to receive response"，
-    ///   气泡上的延迟就一直显示不出来。
+    /// ★ 为什么要发一个真正的 adb 包，而不是「发个字节等对方关连接」：
+    ///   adbd 收到非 adb 协议的字节**不会关连接**（它在等协议后续），
+    ///   于是 recv 一直阻塞到超时 —— 实测无论局域网还是隧道，延迟一直出不来。
     ///
-    ///   改成「发一个字节 → **等连接被关闭**」：对端关闭意味着这一来一回已经走完，
-    ///   EOF 到达的时间就是一次完整的往返。这也顺带覆盖了 frp 隧道的情况
-    ///   （隧道把字节送到手机、手机上的 adbd 关连接、关闭事件再穿回来）。
+    ///   而 adb 协议规定：收到 `CNXN` 必须回 `AUTH`（未授权）或 `CNXN`（已授权）。
+    ///   所以发一个最小 CNXN 包，等到任何回应的时间就是**一次完整往返**。
+    ///   这也天然覆盖隧道模式：包穿过隧道送到手机的 adbd，回应再穿回来。
+    ///
+    ///   注：adb 现代实现不校验 CRC，填 0 即可。
     static func measureRoundTrip(host: String, port: UInt16, timeout: TimeInterval) -> Double? {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -252,7 +260,6 @@ struct LanDiscovery {
         addr.sin_port = port.bigEndian
         guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return nil }
 
-        // 连接超时和读超时都设上，避免任何一个阶段挂死
         var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
@@ -266,20 +273,34 @@ struct LanDiscovery {
         }
         guard connectResult == 0 else { return nil }
 
-        // 发一个字节触发对端关闭（内容无所谓，adbd 只认协议不认内容）
-        var byte: UInt8 = 0
-        guard send(fd, &byte, 1, 0) == 1 else { return nil }
+        // 组装一个最小的 adb CNXN 包
+        let payload = Array("host::\0".utf8)
+        var packet = Data()
+        func appendUInt32(_ value: UInt32) {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { packet.append(contentsOf: $0) }
+        }
+        let cnxn: UInt32 = 0x4e584e43                 // 'CNXN'
+        appendUInt32(cnxn)
+        appendUInt32(0x01000001)                      // version
+        appendUInt32(256 * 1024)                      // maxdata
+        appendUInt32(UInt32(payload.count))
+        appendUInt32(0)                               // crc32 —— 现代 adbd 不校验
+        appendUInt32(cnxn ^ 0xFFFFFFFF)               // magic
+        packet.append(contentsOf: payload)
 
-        // 等 EOF：recv 返回 0 就是对端关了；返回 -1 代表出错/超时，也当结束
+        let sent = packet.withUnsafeBytes { raw -> Int in
+            guard let base = raw.baseAddress else { return -1 }
+            return send(fd, base, packet.count, 0)
+        }
+        guard sent == packet.count else { return nil }
+
         var buffer = [UInt8](repeating: 0, count: 64)
         let received = recv(fd, &buffer, buffer.count, 0)
         let elapsed = Date().timeIntervalSince(start) * 1000.0
 
-        // 只有真正等到对端动作（EOF 或有数据）才算有效样本；
-        // 超时（EAGAIN）说明对端压根没理我们，这种数不能拿来显示。
-        if received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return nil
-        }
+        // 收到任何字节都算一次成功往返；超时/出错则这次样本作废
+        guard received > 0 else { return nil }
         return elapsed
     }
 }

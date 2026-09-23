@@ -463,16 +463,16 @@ class SessionNetworking {
     private func findLanHost(portText: String, session: ScrcpySessionModel) async -> String? {
         guard let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return nil }
 
-        // 先看缓存：对上次扫到的地址做一次**真实往返**验证，通的直接进匹配。
+        // 先看缓存：对上次扫到的地址做一次**真实往返**验证，活的才留下。
         //
         // ★ 这里必须用「发字节等 EOF」而不是 NWConnection 的 ready 状态：
         //   切网的瞬间（WiFi→蜂窝）WiFi 接口还没消失，NWConnection 可能仍然报 ready，
         //   但那时的连接其实已经不通了 —— 实测就是被这个坑到，蜂窝下还拿着
         //   局域网的缓存地址去连，白等一场。
-        var candidates = lanScanCache
+        var candidates: [LanDiscovery.Candidate] = []
         if let scannedAt = lanScanAt, Date().timeIntervalSince(scannedAt) < lanScanTTL {
-            let alive = await withTaskGroup(of: (LanDiscovery.Candidate, Bool).self) { group -> [LanDiscovery.Candidate] in
-                for candidate in candidates {
+            candidates = await withTaskGroup(of: (LanDiscovery.Candidate, Bool).self) { group -> [LanDiscovery.Candidate] in
+                for candidate in lanScanCache {
                     group.addTask {
                         (candidate, await self.isAlive(host: candidate.host, port: port, timeout: 1.0))
                     }
@@ -483,13 +483,20 @@ class SessionNetworking {
                 }
                 return hits
             }
-            candidates = alive
-        } else {
-            candidates = []
         }
 
-        // 缓存没命中就重扫一遍
+        // 缓存里活着的都不在了（或者压根没有缓存）→ 需要重扫一遍。
+        //
+        // ★★ 这里有个曾经踩过的坑：**不能去调一个"会返回缓存"的重扫函数**。
+        //    缓存的存活验证刚刚才失败（蜂窝下 4 台当然都不通），如果重扫又把那份
+        //    旧缓存原样端回来，等于把刚验证过已经死掉的地址复活了 ——
+        //    实测就是这么拿着 192.168.167.169 去直连、然后失败。
+        //    所以这里要么**真的扫一遍**，要么（不在 WiFi 上）直接放弃。
         if candidates.isEmpty {
+            guard LanDiscovery.isOnWiFi() else {
+                print("[LanDiscovery] 缓存已失效且当前不在 WiFi —— 直接走隧道，不扫了")
+                return nil
+            }
             candidates = await discoverLan(port: port)
         }
         guard !candidates.isEmpty else { return nil }
@@ -583,10 +590,6 @@ class SessionNetworking {
     }
 
     private func discoverLan(port: UInt16) async -> [LanDiscovery.Candidate] {
-        if let scannedAt = lanScanAt, Date().timeIntervalSince(scannedAt) < lanScanTTL, !lanScanCache.isEmpty {
-            return lanScanCache
-        }
-
         // ★ 已经有扫描在跑就复用它，别再起一个。
         //   预热扫描（App 启动时）和这里的调用会撞车：两个并发跑的话，
         //   既浪费，也会让 adb 设备表被临时连接污染两次（push 会失败）。
@@ -594,6 +597,11 @@ class SessionNetworking {
             return await running.value
         }
 
+        // ★★ 这里**故意不返回缓存**，哪怕缓存还没过期。
+        //    调用方是「缓存的存活验证刚刚失败」之后才走到这儿的，
+        //    这时端回旧缓存 = 把刚验证过已经死掉的地址复活 ——
+        //    实测就是这么拿着 192.168.167.169 去直连、然后失败。
+        //    要重扫就真扫一遍。
         let task = Task { await LanDiscovery.discover(port: port) }
         lanScanTask = task
         let found = await task.value
