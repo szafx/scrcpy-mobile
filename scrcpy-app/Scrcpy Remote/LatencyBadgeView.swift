@@ -25,22 +25,37 @@ struct LatencyBadgeView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                // 圆点按延迟分档上色，瞟一眼就知道好不好
-                Circle()
-                    .fill(latencyColor)
-                    .frame(width: 7, height: 7)
+            // 横幅优先：重连之类的临时状态压过常规读数
+            // （重连时投屏画面是冻结的，SwiftUI 的状态界面又被 SDL 窗口盖住，
+            //   只有这个浮层能告诉用户「正在发生什么」）
+            if let banner = monitor.banner {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 10, height: 10)
+                    Text(banner)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    // 圆点按延迟分档上色，瞟一眼就知道好不好
+                    Circle()
+                        .fill(latencyColor)
+                        .frame(width: 7, height: 7)
 
-                Text(monitor.kind.label)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.primary)
+                    Text(monitor.kind.label)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.primary)
 
-                Text(latencyText)
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                    .foregroundColor(latencyColor)
+                    Text(latencyText)
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundColor(latencyColor)
+                }
             }
 
-            if expanded {
+            if expanded && monitor.banner == nil {
                 if let jitter = monitor.jitterMs {
                     Text(String(format: "抖动 ±%.0f ms", jitter))
                         .font(.system(size: 10).monospacedDigit())

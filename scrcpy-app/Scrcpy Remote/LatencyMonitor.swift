@@ -67,6 +67,18 @@ final class LatencyMonitor: ObservableObject {
     /// 当前连接方式
     @Published private(set) var kind: ConnectionKind = .unknown
 
+    /// 临时横幅（重连提示等）。
+    ///
+    /// ★ 为什么重连提示要放这儿：投屏画面是 SDL 建的**原生窗口**，盖在 SwiftUI 之上，
+    ///   所以 `ConnectionStatusView` 那类 SwiftUI 状态界面在投屏期间**根本看不见**
+    ///   （用户实测：重连时什么都看不到，只有卡住的画面）。
+    ///   而气泡这个窗浮在 SDL 之上，是唯一能在这时候显示东西的地方。
+    @Published private(set) var banner: String?
+
+    func setBanner(_ text: String?) {
+        banner = text
+    }
+
     private var timer: Timer?
     private var samples: [Double] = []
     private let maxSamples = 6

@@ -32,6 +32,11 @@ final class LatencyBadgeWindow {
 
     /// 连接成功、投屏画面出来后调用。重复调用是安全的。
     func show() {
+        // 先清临时提示（「正在重连…」之类），恢复常规读数。
+        // ★ 必须放在下面那个 guard 之前 —— 窗口还在显示时 show() 会提前返回，
+        //   放后面就清不掉了。
+        LatencyMonitor.shared.setBanner(nil)
+
         guard window == nil else { return }
 
         guard let scene = UIApplication.shared.connectedScenes
@@ -58,6 +63,8 @@ final class LatencyBadgeWindow {
         newWindow.isHidden = false
         window = newWindow
 
+        // 连上了 —— 把「正在重连…」之类的临时提示清掉，恢复常规读数
+        LatencyMonitor.shared.setBanner(nil)
         LatencyMonitor.shared.start()
         print("[LatencyBadgeWindow] 气泡已显示")
     }
@@ -69,6 +76,23 @@ final class LatencyBadgeWindow {
         window = nil
         LatencyMonitor.shared.stop()
         print("[LatencyBadgeWindow] 气泡已隐藏")
+    }
+
+    /// 显示一条临时提示（重连用）。
+    ///
+    /// ★ 为什么走这个窗口：投屏画面是 SDL 建的**原生窗口**，盖在 SwiftUI 之上，
+    ///   所以 `ConnectionStatusView` 那类 SwiftUI 状态界面在投屏期间**根本看不见** ——
+    ///   用户实测「重连的时候我根本看不到提示，只能看到卡住」。
+    ///   气泡这个窗浮在 SDL 之上，是这时候唯一能显示东西的地方。
+    func showBanner(_ message: String) {
+        if !isShowing { show() }   // 断线时窗口可能已经被 hide 掉
+        LatencyMonitor.shared.setBanner(message)
+        print("[LatencyBadgeWindow] 横幅：\(message)")
+    }
+
+    /// 清掉临时提示，恢复常规读数。
+    func clearBanner() {
+        LatencyMonitor.shared.setBanner(nil)
     }
 }
 

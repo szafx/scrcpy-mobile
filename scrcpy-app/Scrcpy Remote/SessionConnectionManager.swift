@@ -288,6 +288,10 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         isAutoReconnecting = true
         print("[AutoReconnect] 连接已断（网络切换导致），自动重连…")
         statusCallback(ScrcpyStatusConnecting, "网络已切换，正在重连…", true)
+        // ★ 同时显示在气泡上。投屏画面这会儿是**冻结的**（连接断了），
+        //   而 SwiftUI 的状态界面被 SDL 原生窗口盖住 ——
+        //   用户实测「重连的时候我根本看不到提示，只能看到卡住」。
+        LatencyBadgeWindow.shared.showBanner("网络已切换，正在重连…")
 
         disconnectCurrent()
         // 给底层一点时间收尾：frp 隧道、tsnet 转发都要清理干净再重来，
