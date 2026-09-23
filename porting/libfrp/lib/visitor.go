@@ -51,6 +51,26 @@ type VisitorOptions struct {
 	// KeepTunnelOpen 是否一直保持打洞（true 时即使没连接也维持 P2P）
 	KeepTunnelOpen bool
 
+	// ★ FallbackTo：打洞失败时改连哪条 proxy（一般是被控端同时暴露的 TCP 中转）。
+	//
+	// 不配的话 frp **只会一直重试打洞，永远不走中转** ——
+	// 实测两端都是 HardNAT + BehaviorPortChanged（最难打的组合）时，
+	// 打洞是**时通时不通**的，没有兜底就会一直卡在重试上。
+	//
+	// 留空则自动用 "<ProxyName>-tcp"（部署脚本 deploy-frpc.py 会建好这条）。
+	// 想彻底关掉兜底就填 "-"。
+	FallbackTo string
+	// FallbackTimeoutMs 打洞等多久算失败（默认 8000ms）
+	FallbackTimeoutMs int
+
+	// Protocol 打洞用的协议："quic"（frp 默认）或 "tcp"。
+	// 移动网络上 UDP 常被 QoS，quic 打不通时可以试 tcp。
+	Protocol string
+
+	// MaxRetriesAnHour / MinRetryInterval 打洞重试节奏（frp 默认 8 次/小时、15s）
+	MaxRetriesAnHour int
+	MinRetryInterval int
+
 	// LogLevel 默认 info
 	LogLevel string
 }
@@ -80,6 +100,36 @@ func (o *VisitorOptions) genConfigTOML() string {
 	if stun == "" {
 		stun = "stun.miwifi.com:3478"
 	}
+
+	// ★ 兜底：留空就默认 "<proxy>-tcp"（部署脚本 deploy-frpc.py 会一并建好那条）；
+	//   想彻底不要兜底填 "-"。
+	fallbackTo := o.FallbackTo
+	if fallbackTo == "" {
+		fallbackTo = o.ProxyName + "-tcp"
+	}
+	fallbackTimeoutMs := o.FallbackTimeoutMs
+	if fallbackTimeoutMs <= 0 {
+		fallbackTimeoutMs = 8000
+	}
+	protocol := o.Protocol
+	if protocol == "" {
+		protocol = "quic"
+	}
+	maxRetries := o.MaxRetriesAnHour
+	if maxRetries <= 0 {
+		maxRetries = 8
+	}
+	minRetryInterval := o.MinRetryInterval
+	if minRetryInterval <= 0 {
+		minRetryInterval = 15
+	}
+
+	fallbackBlock := ""
+	if fallbackTo != "-" {
+		fallbackBlock = fmt.Sprintf("fallbackTo = %q\nfallbackTimeoutMs = %d\n",
+			fallbackTo, fallbackTimeoutMs)
+	}
+
 	return fmt.Sprintf(`serverAddr = %q
 serverPort = %d
 natHoleStunServer = %q
@@ -102,12 +152,16 @@ secretKey = %q
 bindAddr = "127.0.0.1"
 bindPort = %d
 keepTunnelOpen = %v
-`,
+protocol = %q
+maxRetriesAnHour = %d
+minRetryInterval = %d
+%s`,
 		o.ServerAddr, o.ServerPort, stun,
 		o.Token,
 		filepath.Join(o.BaseDir, "frpc_visitor.log"), logLevel,
 		"visitor-"+o.ProxyName, o.ProxyName, o.SecretKey,
-		o.LocalPort, o.KeepTunnelOpen)
+		o.LocalPort, o.KeepTunnelOpen, protocol, maxRetries, minRetryInterval,
+		fallbackBlock)
 }
 
 // StartVisitor 启动一条 XTCP visitor 隧道。
