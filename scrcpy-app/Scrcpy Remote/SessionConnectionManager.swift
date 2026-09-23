@@ -317,8 +317,20 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
 
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            // 已经断开/正在重连/正在连接 → 说明正常流程已经处理了，不用我们插手
-            guard self.connectionStatus != ScrcpyStatusDisconnected,
+            // ★★ 只在「已经稳定连着」时才主动拆。
+            //
+            //   以前的条件是「不是 Disconnected」，太宽了 —— 于是：
+            //     切到蜂窝 → pdp_ip0 反复报路径变化 → 每次都排一个 2 秒定时器
+            //     → 等重连把新连接建好之后，那些排队的定时器一触发，
+            //       就把**刚建好的好连接**又拆掉了（真机日志：
+            //       Starting connection 刚过、紧跟着就是「主动拆掉重连」）
+            //   结果是永远在重连、卡在「frp 隧道就绪」。
+            //
+            //   现在只有 Connected / SDLWindowAppeared 才认为"确实连着"，
+            //   连接中、断开、失败一律不插手。
+            let stable = self.connectionStatus == ScrcpyStatusConnected
+                      || self.connectionStatus == ScrcpyStatusSDLWindowAppeared
+            guard stable,
                   !self.isAutoReconnecting,
                   !self.isConnecting,
                   self.currentSession != nil else { return }
@@ -526,7 +538,13 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 //   "User disconnected from ADB client"（真机日志实锤）。
                 // 用 statusMessage 而不是上面的 disconnectMessage —— 后者在 if let 的作用域里，
                 // 出了那个块就不可见了（编译报 cannot find in scope）。
+                // 注意：这条消息**重连自己拆旧连接时也会发**（teardownConnectionForReconnect
+                // 走的就是同一条底层断开路径），所以必须再排除「正在重连」的情况，
+                // 否则会把自动重连的拆解误判成用户主动断开（真机日志里就出现了
+                // 「用户主动断开」紧跟在重连日志后面）。
                 let userInitiated = statusMessage?.localizedCaseInsensitiveContains("user disconnected") == true
+                                    && !self.isAutoReconnecting
+                                    && !self.isReconnecting
                 if userInitiated {
                     print("[AutoReconnect] 用户主动断开 —— 不重连，清掉网络变化标记")
                     self.justHadNetworkChange = false
