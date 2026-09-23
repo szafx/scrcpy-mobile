@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Network
 
 /// Result of network configuration resolution
 struct NetworkConnectionInfo {
@@ -57,7 +58,30 @@ class SessionNetworking {
         let originalHost = session.hostReal
         let originalPort = session.port
 
-        // frp XTCP 优先：被控端不占 VpnService（要挂代理），App 端也不占 VPN 槽
+        // ★ 三级降级的第一级：Host 只要连得上就直接走它（局域网最快）。
+        //
+        //   必须放在 frp / Tailscale **之前** —— 否则勾了隧道开关就永远走隧道，
+        //   明明在家连着同一个 WiFi，也要绕出去一趟，白白多几十毫秒。
+        //
+        //   探测超时很短（0.8s），连不上立刻落到下一级，不会拖慢连接。
+        //   所以 Host 应该填**手机在局域网里的地址**（比如 192.168.167.169），
+        //   出家门连不上时自然就落到 frp 了。
+        if session.useFrp || session.useTailscale,
+           await isReachable(host: originalHost, portText: originalPort, timeout: 0.8) {
+            print("[SessionNetworking] \(originalHost):\(originalPort) 可达 —— 直接走局域网，跳过隧道")
+            statusUpdateCallback?("Using LAN (direct)")
+            return NetworkConnectionInfo(
+                host: originalHost,
+                port: originalPort,
+                isUsingTailscale: false,
+                isUsingFrp: false,
+                originalHost: originalHost,
+                originalPort: originalPort,
+                localForwardPort: nil
+            )
+        }
+
+        // frp XTCP：被控端不占 VpnService（要挂代理），App 端也不占 VPN 槽
         if session.useFrp {
             return await setupFrpConnection(session: session)
         }
@@ -355,6 +379,50 @@ class SessionNetworking {
         }
 
         return false
+    }
+
+    /// 目标地址能不能连上（用来判断「现在是不是和手机在同一个局域网」）。
+    ///
+    /// 用 NWConnection 而不是裸 socket：它天生异步、带状态回调，
+    /// 超时也好控制（这里给的很短，连不上要立刻落到下一级隧道）。
+    private func isReachable(host: String, portText: String, timeout: TimeInterval) async -> Bool {
+        let trimmedHost = host.trimmingCharacters(in: .whitespaces)
+        guard !trimmedHost.isEmpty, !trimmedHost.hasPrefix("frp") else { return false }
+        guard let portNumber = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return false }
+        // 127.0.0.1 上探测没有意义（连的是自己）
+        guard trimmedHost != "127.0.0.1", trimmedHost != "localhost" else { return false }
+
+        return await withCheckedContinuation { continuation in
+            let queue = DispatchQueue(label: "com.scrcpy.lan-probe")
+            let connection = NWConnection(
+                host: NWEndpoint.Host(trimmedHost),
+                port: NWEndpoint.Port(rawValue: portNumber) ?? .any,
+                using: .tcp
+            )
+
+            // 只 resume 一次：状态回调和超时定时器都会走到这里
+            var finished = false
+            func finish(_ result: Bool) {
+                guard !finished else { return }
+                finished = true
+                connection.cancel()
+                continuation.resume(returning: result)
+            }
+
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    finish(true)
+                case .failed, .cancelled:
+                    finish(false)
+                default:
+                    break
+                }
+            }
+
+            connection.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + timeout) { finish(false) }
+        }
     }
 
     /// 本机端口能不能连上（连 127.0.0.1 失败是立刻返回的，不会挂住）。

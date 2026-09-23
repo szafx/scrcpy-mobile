@@ -98,6 +98,9 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     
     /// 是否使用 Tailscale 连接
     @Published var isUsingTailscale: Bool = false
+
+    /// 是否经内嵌 frp XTCP visitor 连接（具体走 P2P 还是中转见 LatencyMonitor）
+    @Published var isUsingFrp: Bool = false
     
     /// Tailscale 本地转发端口（如果使用）
     @Published var tailscaleLocalPort: Int?
@@ -731,11 +734,13 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
             actualHost = info.host
             actualPort = info.port
             isUsingTailscale = info.isUsingTailscale
+            isUsingFrp = info.isUsingFrp
             tailscaleLocalPort = info.localForwardPort
         } else {
             actualHost = session.hostReal
             actualPort = session.port
             isUsingTailscale = false
+            isUsingFrp = false
             tailscaleLocalPort = nil
         }
         
@@ -758,6 +763,7 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         actualHost = nil
         actualPort = nil
         isUsingTailscale = false
+        isUsingFrp = false
         tailscaleLocalPort = nil
         connectionStatus = ScrcpyStatusDisconnected
         isConnecting = false

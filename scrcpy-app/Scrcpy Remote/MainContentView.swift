@@ -304,6 +304,8 @@ struct MainContentView: View {
                         print("✅ [MainContentView] SDL Window appeared, restoring navigation bar and hiding status view")
                         isNavigationBarHidden = false
                         userDismissedConnection = false // 重置用户关闭标志
+                        // 投屏画面出来了 —— 把「走哪条路 + 延迟」的气泡浮到画面之上
+                        LatencyBadgeWindow.shared.show()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             currentStatusMessage = nil
                             print("🧹 [MainContentView] currentStatusMessage cleared after SDL window appeared")
@@ -320,6 +322,7 @@ struct MainContentView: View {
                         print("❌ [MainContentView] Connection failed, waiting for user to dismiss")
                         print("❌ [MainContentView] Current currentStatusMessage: \(currentStatusMessage ?? "nil")")
                         isNavigationBarHidden = true
+                        LatencyBadgeWindow.shared.hide()
                         
                         // 不自动清除状态消息，等待用户点击 dismiss 按钮
                         
@@ -328,6 +331,7 @@ struct MainContentView: View {
                         isNavigationBarHidden = false
                         userDismissedConnection = false // 重置用户关闭标志
                         currentStatusMessage = nil
+                        LatencyBadgeWindow.shared.hide()
                         print("🧹 [MainContentView] currentStatusMessage cleared after disconnect")
                         
                     default:
@@ -505,6 +509,8 @@ struct MainContentView: View {
                         print("✅ [MainContentView] SDL Window appeared, restoring navigation bar and hiding status view")
                         isNavigationBarHidden = false
                         userDismissedConnection = false // 重置用户关闭标志
+                        // 投屏画面出来了 —— 把「走哪条路 + 延迟」的气泡浮到画面之上
+                        LatencyBadgeWindow.shared.show()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             currentStatusMessage = nil
                             print("🧹 [MainContentView] currentStatusMessage cleared after SDL window appeared")
@@ -521,6 +527,7 @@ struct MainContentView: View {
                         print("❌ [MainContentView] Connection failed, waiting for user to dismiss")
                         print("❌ [MainContentView] Current currentStatusMessage: \(currentStatusMessage ?? "nil")")
                         isNavigationBarHidden = true
+                        LatencyBadgeWindow.shared.hide()
                         
                         // 不自动清除状态消息，等待用户点击 dismiss 按钮
                         
@@ -529,6 +536,7 @@ struct MainContentView: View {
                         isNavigationBarHidden = false
                         userDismissedConnection = false // 重置用户关闭标志
                         currentStatusMessage = nil
+                        LatencyBadgeWindow.shared.hide()
                         print("🧹 [MainContentView] currentStatusMessage cleared after disconnect")
                         
                     default:
