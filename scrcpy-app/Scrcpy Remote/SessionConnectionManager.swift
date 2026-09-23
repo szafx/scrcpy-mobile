@@ -120,6 +120,20 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     /// 当前错误回调闭包
     private var currentErrorCallback: ConnectionErrorCallback?
 
+    /// 最近一次连接用的回调 —— **专门留给重连复用**。
+    ///
+    /// ★ 为什么不直接用 currentConnectionCallback：那个在连接成功/失败后会被
+    ///   `cleanupCallbacksAfterSuccess` / `...Failure` 清成 nil（它本来就是给
+    ///   连接过程用的，用完即弃）。可重连发生在**连接成功之后**（用着用着网断了），
+    ///   那时它早就是 nil 了。
+    ///
+    ///   实测日志就是这么卡住的：
+    ///     [AutoReconnect] 网络路径变化：可用，接口 [pdp_ip0]
+    ///     [AutoReconnect] 没有可复用的回调，跳过自动重连     ←★
+    ///   结果是切网之后永远不恢复，用户只看到画面冻结。
+    private var reusableStatusCallback: ConnectionStatusCallback?
+    private var reusableErrorCallback: ConnectionErrorCallback?
+
     // MARK: - 网络变化 → 自动重连（相关状态）
 
     /// 监听网络路径变化：切 WiFi、切蜂窝、掉线重连都会触发
@@ -275,8 +289,11 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
 
     private func performAutoReconnect(_ session: ScrcpySessionModel) {
         guard !isAutoReconnecting else { return }
-        guard let statusCallback = currentConnectionCallback,
-              let errorCallback = currentErrorCallback else {
+        // 用**专门留给重连的那份**回调 —— currentConnectionCallback 在连接成功后
+        // 已经被 cleanupCallbacksAfterSuccess 清成 nil 了，
+        // 拿它判断会永远走到「没有可复用的回调，跳过自动重连」。
+        guard let statusCallback = reusableStatusCallback,
+              let errorCallback = reusableErrorCallback else {
             print("[AutoReconnect] 没有可复用的回调，跳过自动重连")
             return
         }
@@ -586,6 +603,9 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         // 保存回调闭包
         currentConnectionCallback = statusCallback
         currentErrorCallback = errorCallback
+        // 另存一份给重连用（上面那两个连接结束会被清掉，见 reusableStatusCallback 的说明）
+        reusableStatusCallback = statusCallback
+        reusableErrorCallback = errorCallback
         
         // 如果当前状态不是 Disconnected，先断开现有连接
         if connectionStatus != ScrcpyStatusDisconnected {
