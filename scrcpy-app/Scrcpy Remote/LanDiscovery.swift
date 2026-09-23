@@ -215,9 +215,9 @@ struct LanDiscovery {
         addr.sin_port = port.bigEndian
         guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return false }
 
-        let connectResult = withUnsafePointer(to: &addr) {
+        let connectResult = withUnsafePointer(to: &storage) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                connect(fd, $0, addrLen)
             }
         }
 
@@ -274,14 +274,39 @@ struct LanDiscovery {
     ///
     ///   注：adb 现代实现不校验 CRC，填 0 即可。
     static func measureRoundTrip(host: String, port: UInt16, timeout: TimeInterval) -> Double? {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        // ★★ 用 getaddrinfo 解析，不能用 inet_pton —— 后者**只认 IP 字面量**。
+        //
+        //   真机实测：直连/中转模式下 host 是域名（home.szafx.icu），
+        //   inet_pton 直接失败，探测每次都在这一步退出，气泡上一直没数字。
+        //   局域网模式 host 是 192.168.x.x 才能过 —— 所以这个问题被掩盖了很久。
+        //
+        //   而且家里 DDNS 是 **AAAA-only**（只有 IPv6 记录），
+        //   所以必须同时支持 v6，不能只解析 v4。用 sockaddr_storage 装结果，
+        //   它对 v4/v6 都够大。
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &res) == 0, let head = res else {
+            return nil
+        }
+        defer { freeaddrinfo(head) }
+
+        // 只取第一个候选（getaddrinfo 已按优先级排好）
+        let family = head.pointee.ai_family
+        let addrLen = head.pointee.ai_addrlen
+
+        let fd = socket(family, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
 
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = port.bigEndian
-        guard inet_pton(AF_INET, host, &addr.sin_addr) == 1 else { return nil }
+        var storage = sockaddr_storage()
+        guard addrLen <= MemoryLayout<sockaddr_storage>.size else { return nil }
+        withUnsafeMutablePointer(to: &storage) { dst in
+            dst.withMemoryRebound(to: CChar.self, capacity: MemoryLayout<sockaddr_storage>.size) { raw in
+                memcpy(raw, head.pointee.ai_addr, Int(addrLen))
+            }
+        }
 
         let start = Date()
 
