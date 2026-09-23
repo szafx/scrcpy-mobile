@@ -36,6 +36,8 @@ final class LatencyBadgeWindow {
         // ★ 必须放在下面那个 guard 之前 —— 窗口还在显示时 show() 会提前返回，
         //   放后面就清不掉了。
         LatencyMonitor.shared.setBanner(nil)
+        // 连接成功 = 在投屏界面了，允许浮层显示（回主页时会被 suppressAndHide 关掉）
+        allowsDisplay = true
 
         guard window == nil else { return }
 
@@ -78,17 +80,48 @@ final class LatencyBadgeWindow {
         print("[LatencyBadgeWindow] 气泡已隐藏")
     }
 
+    /// 连接开始 / 投屏出现时调用 —— 这时才允许浮层显示。
+    func allowDisplay() {
+        allowsDisplay = true
+    }
+
+    /// 回到主页时调用 —— 收掉浮层，并禁止之后再冒出来。
+    ///
+    /// ★ 这一步是必须的：回到主页意味着这次连接结束了，
+    ///   后面就算网络又变化，也不该再有「正在重连」浮在主页上
+    ///   （用户原话：「回到主页，就不能尝试重连了，只能让用户手动去连」）。
+    func suppressAndHide() {
+        allowsDisplay = false
+        hide()
+    }
+
     /// 显示一条临时提示（重连用）。
     ///
     /// ★ 为什么走这个窗口：投屏画面是 SDL 建的**原生窗口**，盖在 SwiftUI 之上，
     ///   所以 `ConnectionStatusView` 那类 SwiftUI 状态界面在投屏期间**根本看不见** ——
     ///   用户实测「重连的时候我根本看不到提示，只能看到卡住」。
     ///   气泡这个窗浮在 SDL 之上，是这时候唯一能显示东西的地方。
+    ///
+    /// ★★ 但它**只在投屏/连接界面存在**（见 allowsDisplay 的说明）：
+    ///   用户已经回到主页了，还浮着一条「正在重连」是很怪的 ——
+    ///   回主页意味着这次连接结束了，该由用户手动决定要不要再连。
     func showBanner(_ message: String) {
+        guard allowsDisplay else {
+            print("[LatencyBadgeWindow] 已经回到主页，不显示重连横幅")
+            return
+        }
         if !isShowing { show() }   // 断线时窗口可能已经被 hide 掉
         LatencyMonitor.shared.setBanner(message)
         print("[LatencyBadgeWindow] 横幅：\(message)")
     }
+
+    /// 允不允许显示浮层。
+    ///
+    /// 判据就是用户提的那条：**气泡只属于「正在连接的界面」**。
+    /// 回到主页 = 这次连接结束 = 不该再有任何自动重连的痕迹，只能用户手动发起。
+    ///
+    /// 由 MainContentView 在进入/离开主页时设置。
+    var allowsDisplay: Bool = true
 
     /// 清掉临时提示，恢复常规读数。
     func clearBanner() {

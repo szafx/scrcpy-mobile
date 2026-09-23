@@ -336,7 +336,10 @@ struct MainContentView: View {
                         isNavigationBarHidden = false
                         userDismissedConnection = false // 重置用户关闭标志
                         currentStatusMessage = nil
-                        LatencyBadgeWindow.shared.hide()
+                        // 回到主页 = 这次连接结束：收掉浮层并**禁止它再冒出来**。
+                        // 网络后面再怎么变，也不该有一条「正在重连」浮在主页上
+                        // （用户要求：回主页就不能自动重连了，只能手动去连）。
+                        LatencyBadgeWindow.shared.suppressAndHide()
                         print("🧹 [MainContentView] currentStatusMessage cleared after disconnect")
                         
                     default:
@@ -546,7 +549,10 @@ struct MainContentView: View {
                         isNavigationBarHidden = false
                         userDismissedConnection = false // 重置用户关闭标志
                         currentStatusMessage = nil
-                        LatencyBadgeWindow.shared.hide()
+                        // 回到主页 = 这次连接结束：收掉浮层并**禁止它再冒出来**。
+                        // 网络后面再怎么变，也不该有一条「正在重连」浮在主页上
+                        // （用户要求：回主页就不能自动重连了，只能手动去连）。
+                        LatencyBadgeWindow.shared.suppressAndHide()
                         print("🧹 [MainContentView] currentStatusMessage cleared after disconnect")
                         
                     default:
