@@ -64,10 +64,43 @@ final class LatencyBadgeWindow {
         newWindow.isHidden = false
         window = newWindow
 
+        // ★★ 拖动用 **UIKit 手势**，不用 SwiftUI 的 DragGesture。
+        //
+        //   实测：SwiftUI 的 DragGesture 在这个独立窗口里压根不响应
+        //   （命中区日志显示 hitFrame 是正确的、窗口也吃到了触摸，
+        //     但手势就是不触发）。而 App 自带的菜单图标能随意拖动 ——
+        //   它用的正是 UIPanGestureRecognizer。照抄它最省事。
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.cancelsTouchesInView = true
+        pan.delaysTouchesEnded = true
+        newWindow.rootViewController?.view.addGestureRecognizer(pan)
+
         // 连上了 —— 把「正在重连…」之类的临时提示清掉，恢复常规读数
         LatencyMonitor.shared.setBanner(nil)
         LatencyMonitor.shared.start()
         print("[LatencyBadgeWindow] 气泡已显示")
+    }
+
+    /// 拖动气泡。偏移累加到 BadgePosition.offset，抬手时存盘。
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        let position = BadgePosition.shared
+
+        switch gesture.state {
+        case .changed:
+            let t = gesture.translation(in: gesture.view)
+            position.dragOffset = CGSize(width: t.x, height: t.y)
+
+        case .ended, .cancelled:
+            let t = gesture.translation(in: gesture.view)
+            position.offset = CGSize(width: position.offset.width + t.x,
+                                     height: position.offset.height + t.y)
+            position.dragOffset = .zero
+            position.save()
+            print("[LatencyBadgeWindow] 气泡移到 \(position.offset)")
+
+        default:
+            break
+        }
     }
 
     /// 断开连接时调用。
@@ -167,9 +200,6 @@ private struct LatencyBadgeHost: View {
 
     @ObservedObject private var badge = BadgePosition.shared
 
-    /// 拖动过程中的临时累加，抬手时才落到 badge.offset（避免频繁写盘）
-    @State private var dragTranslation: CGSize = .zero
-
     var body: some View {
         VStack {
             HStack {
@@ -177,8 +207,8 @@ private struct LatencyBadgeHost: View {
                 LatencyBadgeView()
                     .padding(.trailing, 10)
                     .padding(.top, 4)
-                    .offset(x: badge.offset.width + dragTranslation.width,
-                            y: badge.offset.height + dragTranslation.height)
+                    .offset(x: badge.offset.width + badge.dragOffset.width,
+                            y: badge.offset.height + badge.dragOffset.height)
                     .background(
                         // 把气泡当前的屏幕矩形报出去 —— 窗口的 hitTest 要用
                         GeometryReader { geo in
@@ -188,20 +218,8 @@ private struct LatencyBadgeHost: View {
                             )
                         }
                     )
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                dragTranslation = value.translation
-                            }
-                            .onEnded { value in
-                                badge.offset = CGSize(
-                                    width: badge.offset.width + value.translation.width,
-                                    height: badge.offset.height + value.translation.height
-                                )
-                                dragTranslation = .zero
-                                badge.save()
-                            }
-                    )
+                    // 拖动由 UIKit 手势处理（见 LatencyBadgeWindow.handlePan），
+                    // 这里不用 DragGesture —— 实测它在这个独立窗口里不触发。
             }
             Spacer()
         }

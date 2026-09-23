@@ -21,6 +21,11 @@ final class BadgePosition: ObservableObject {
     /// 存 UserDefaults —— 用户把气泡挪开后，下次进来还在那儿。
     @Published var offset: CGSize = .zero
 
+    /// 拖动过程中的临时偏移（抬手时并进 offset 并存盘）。
+    /// 拖动由 UIKit 手势驱动（SwiftUI 的 DragGesture 在这个独立窗口里不生效），
+    /// 这里只负责把位移传给视图。
+    @Published var dragOffset: CGSize = .zero
+
     /// 气泡在屏幕坐标系里实际占的矩形（含一点抓取余量），由视图上报。
     /// 窗口的 hitTest 只看它 —— 只在这块范围内才吃触摸。
     @Published var hitFrame: CGRect = .zero
