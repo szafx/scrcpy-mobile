@@ -1190,6 +1190,17 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     }
 
     func disconnectCurrent() {
+        // ★★ 用户主动断开 —— 先把「网络变化」标记清掉。
+        //
+        //   不清的话会有这个漏洞：切网后 15 秒内点「关闭连接」，
+        //   标记还在有效期内 → Disconnected 处理器以为这是网络切断 → 自动重连
+        //   （用户实测：「本身自带的菜单里面有个关闭连接的那个，我关闭之后怎么也触发重新连接了」）。
+        //
+        //   重连的触发条件只有一个：**网络变了**。
+        //   用户主动关、或者连接本来就失败，都不该触发。
+        justHadNetworkChange = false
+        justHadNetworkChangeAt = nil
+
         guard connectionStatus != ScrcpyStatusDisconnected else {
             print("🚫 [SessionConnectionManager] Already disconnected, no action needed")
             return
