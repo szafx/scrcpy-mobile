@@ -284,11 +284,18 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         //
         //   正确做法：网络变化只负责**留个记号**，真正决定要不要重连的是
         //   随后的 Disconnected 处理器 —— 那时它手里还有「刚才连着的会话」。
-        guard currentSession != nil || justDisconnectedFromNetwork else { return }
-        if path.status == .satisfied || !path.availableInterfaces.isEmpty {
-            justHadNetworkChange = true
-            justHadNetworkChangeAt = Date()
-        }
+        // ★ 打标记**不设任何前置条件** —— 网络变了就是变了，照记不误。
+        //
+        //   之前这里有个 `guard currentSession != nil`，造成了环形依赖：
+        //     切网 → 底层断 → Disconnected 处理器先把会话清掉
+        //          → pathUpdateHandler 才到，此时 currentSession 已 nil → 被 guard 拦掉
+        //          → 标记永远设不上 → 断开处理器收不到标记 → 不重连 → 回主页
+        //   真机日志实锤：切 WiFi 那次日志里**完全没有**「网络路径变化」这行。
+        //
+        //   标记本身有时效（15 秒）兜底，所以放宽了也不会误伤 ——
+        //   手动断开时这个标记早就过期了。
+        justHadNetworkChange = true
+        justHadNetworkChangeAt = Date()
     }
 
     /// 网络刚刚变化过（断开处理器据此决定要不要自动重连）。
