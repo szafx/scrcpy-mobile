@@ -30,8 +30,18 @@ final class FrpTunnel {
     private(set) var localPort: Int32 = 0
     private(set) var isRunning = false
 
+    /// 正在打洞的那条 proxy 名（用来判断「同一条隧道是不是已经跑着了」）
+    private(set) var currentProxyName: String = ""
+
     /// 国内可用的 STUN 服务器（2026-09 实测）
     static let defaultStunServer = "stun.miwifi.com:3478"
+
+    /// 配置目录：App 沙盒的 Library/frp（和 TailscaleState 同级）
+    static var defaultBaseDir: String {
+        let libraryPath = NSSearchPathForDirectoriesInDomains(.libraryDirectory, .userDomainMask, true).first
+            ?? NSTemporaryDirectory()
+        return (libraryPath as NSString).appendingPathComponent("frp")
+    }
 
     private init() {}
 
@@ -45,7 +55,11 @@ final class FrpTunnel {
     ///   - proxyName:  被控端 frpc 里 `[[proxies]]` 的 name
     ///   - secretKey:  被控端那个 proxy 的 secretKey
     ///   - baseDir:    放日志/配置的目录（一般传 App 沙盒）
+    ///   - preferredPort: 本机监听端口；不传就随机挑一个
     /// - Returns: 本机监听端口；失败返回 nil（原因见 FrpTunnel.lastError）
+    ///
+    /// ⚠️ 返回成功 **只代表 frpc 进程起来了**，隧道还在后台异步建立。
+    ///    要等端口真的能连，用 SessionNetworking 的 waitForLocalPort。
     @discardableResult
     func start(serverAddr: String,
                serverPort: Int = 7000,
@@ -54,14 +68,15 @@ final class FrpTunnel {
                proxyName: String,
                secretKey: String,
                baseDir: String,
+               preferredPort: Int32? = nil,
                keepTunnelOpen: Bool = true) -> Int32? {
 
         if isRunning {
             stop()
         }
 
-        // 挑一个本机空闲端口给 adb 连
-        let port = Int32(20000 + Int.random(in: 0..<4000))
+        // 本机监听端口（调用方一般会用 SessionNetworking 挑一个空闲的传进来）
+        let port = preferredPort ?? Int32(20000 + Int.random(in: 0..<4000))
 
         // strdup 出来的 C 字符串要手动释放；用 defer 保证异常路径也不漏
         guard let cServer = strdup(serverAddr),
@@ -98,6 +113,7 @@ final class FrpTunnel {
 
         localPort = port
         isRunning = true
+        currentProxyName = proxyName
         print("[FrpTunnel] ✅ visitor 已启动，本机端口 \(port)（proxy=\(proxyName)）")
         return port
     }
@@ -108,7 +124,13 @@ final class FrpTunnel {
         frp_stop_visitor()
         isRunning = false
         localPort = 0
+        currentProxyName = ""
         print("[FrpTunnel] 已停止")
+    }
+
+    /// 这条隧道是不是已经在给同一个 proxy 跑了（跑着就不用重启，省一次打洞）。
+    func isRunning(for proxyName: String) -> Bool {
+        return isRunning && currentProxyName == proxyName && localPort > 0
     }
 
     /// 当前状态（给日志用）。
@@ -116,10 +138,78 @@ final class FrpTunnel {
         return statusString(frp_status())
     }
 
+    /// 最后一次失败的原文（frp 自己的报错，比如 STUN 超时）。
+    var lastErrorText: String {
+        let text = statusString(frp_last_error())
+        return text.isEmpty ? "(no error)" : text
+    }
+
     /// 把 C 返回的 char* 取成 Swift String 并释放。
     private func statusString(_ ptr: UnsafeMutablePointer<CChar>?) -> String {
         guard let ptr = ptr else { return "(null)" }
         defer { frp_free(ptr) }
         return String(cString: ptr)
+    }
+}
+
+/// frp 隧道的**全局**配置。
+///
+/// 每个被控手机有不同的 proxy 名（存在会话里），但 frps 地址 / token /
+/// secretKey / STUN 这些是全局一份，所以放在这里读 UserDefaults
+/// —— key 和 SettingsView 里 `AppSettings` 的 @AppStorage 完全一致。
+struct FrpSettings {
+
+    static let serverAddrKey = "settings.frp.server_addr"
+    static let serverPortKey = "settings.frp.server_port"
+    static let tokenKey      = "settings.frp.token"
+    static let secretKeyKey  = "settings.frp.secret_key"
+    static let stunServerKey = "settings.frp.stun_server"
+
+    var serverAddr: String = ""
+    var serverPort: Int = 7000
+    var token: String = ""
+    var secretKey: String = ""
+    var stunServer: String = FrpTunnel.defaultStunServer
+
+    static func load() -> FrpSettings {
+        let defaults = UserDefaults.standard
+        var settings = FrpSettings()
+
+        settings.serverAddr = (defaults.string(forKey: serverAddrKey) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        settings.token = (defaults.string(forKey: tokenKey) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        settings.secretKey = (defaults.string(forKey: secretKeyKey) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+
+        let portText = (defaults.string(forKey: serverPortKey) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        settings.serverPort = Int(portText) ?? 7000
+
+        // ★ STUN 必须填国内可用的，留空就用实测可用的默认值
+        let stun = (defaults.string(forKey: stunServerKey) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        settings.stunServer = stun.isEmpty ? FrpTunnel.defaultStunServer : stun
+
+        return settings
+    }
+
+    /// 全局配置填全了没（frps 地址 + secretKey；token 允许为空 = frps 没开鉴权）。
+    var isConfigured: Bool {
+        return !serverAddr.isEmpty && !secretKey.isEmpty
+    }
+
+    /// 配置不全时返回给用户看的说明；齐全返回 nil。
+    func validationError(proxyName: String) -> String? {
+        if serverAddr.isEmpty {
+            return "frp server address not set"
+        }
+        if secretKey.isEmpty {
+            return "frp secret key not set"
+        }
+        if proxyName.isEmpty {
+            return "frp proxy name not set"
+        }
+        return nil
     }
 }

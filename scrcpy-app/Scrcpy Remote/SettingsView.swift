@@ -184,6 +184,26 @@ class AppSettings: ObservableObject {
     @AppStorage("settings.tailscale.auth_key_expires_at")
     var tailscaleAuthKeyExpiresAt: String = ""
     
+    // MARK: - frp 隧道（内嵌 XTCP visitor）
+    // key 和 FrpSettings（FrpTunnel.swift）里那组常量必须一致，
+    // 连接时 SessionNetworking 是直接读 UserDefaults 的。
+
+    @AppStorage(FrpSettings.serverAddrKey)
+    var frpServerAddr: String = ""
+
+    @AppStorage(FrpSettings.serverPortKey)
+    var frpServerPort: String = "7000"
+
+    @AppStorage(FrpSettings.tokenKey)
+    var frpToken: String = ""
+
+    @AppStorage(FrpSettings.secretKeyKey)
+    var frpSecretKey: String = ""
+
+    // ★ 必须填国内能连上的，默认那个 stun.easyvoip.com 国内连不通，打洞必死在第一步
+    @AppStorage(FrpSettings.stunServerKey)
+    var frpStunServer: String = FrpTunnel.defaultStunServer
+
     @AppStorage("settings.live_activity.enabled")
     var liveActivityEnabled: Bool = true
 
@@ -311,6 +331,9 @@ struct SettingsView: View {
                     // }
                     NavigationLink(destination: TailscaleAuthSettingsView()) {
                         Text("Tailscale Auth Setting")
+                    }
+                    NavigationLink(destination: FrpTunnelSettingsView()) {
+                        Text("frp Tunnel (XTCP)")
                     }
                 }
                 // Only show ADB management options when there are ADB type sessions
@@ -470,6 +493,72 @@ struct ProxySettingsView: View {
             }
         }
         .navigationBarTitle("Socks Proxy", displayMode: .inline)
+    }
+}
+
+struct FrpTunnelSettingsView: View {
+    @EnvironmentObject var appSettings: AppSettings
+
+    // 隧道状态不是 @Published，所以手动刷新一下
+    @State private var tunnelStatus: String = FrpTunnel.shared.status
+
+    var body: some View {
+        Form {
+            Section(header: Text("frp Server")) {
+                TextField("Server Address", text: $appSettings.frpServerAddr)
+                    .textContentType(.URL)
+                    .autocapitalization(.none)
+                    .autocorrectionDisabled(true)
+
+                TextField("Server Port", text: $appSettings.frpServerPort)
+                    .keyboardType(.numberPad)
+
+                SecureField("Auth Token (optional)", text: $appSettings.frpToken)
+                    .autocapitalization(.none)
+                    .autocorrectionDisabled(true)
+
+                SecureField("Secret Key", text: $appSettings.frpSecretKey)
+                    .autocapitalization(.none)
+                    .autocorrectionDisabled(true)
+            }
+
+            Section(header: Text("NAT Hole Punching")) {
+                TextField("STUN Server", text: $appSettings.frpStunServer)
+                    .autocapitalization(.none)
+                    .autocorrectionDisabled(true)
+
+                Text("国内网络连不上海外的 STUN。留空就用实测可用的 \(FrpTunnel.defaultStunServer)，填错会让打洞死在第一步。")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Section(header: Text("Status")) {
+                HStack {
+                    Text("Tunnel")
+                    Spacer()
+                    Text(tunnelStatus)
+                        .foregroundColor(.secondary)
+                }
+
+                Button("Refresh Status") {
+                    tunnelStatus = FrpTunnel.shared.status
+                }
+
+                if FrpTunnel.shared.isRunning {
+                    Button("Stop Tunnel") {
+                        FrpTunnel.shared.stop()
+                        tunnelStatus = FrpTunnel.shared.status
+                    }
+                    .foregroundColor(.red)
+                }
+            }
+
+            Section(header: Text("How it works")) {
+                Text("被控手机跑 frpc（XTCP 模式），它是普通进程、不占 VpnService，所以手机上可以同时挂代理 —— 这正是它比 Tailscale 强的地方。\n\nApp 这端内置了同一版本的 frp 客户端做 visitor：打洞成功走 P2P 直连（快），打不通自动经 frps 中转（慢但能用）。\n\n每台手机在「会话 → Connect over frp」里勾上，并填它自己的 proxy 名。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
     }
 }
 

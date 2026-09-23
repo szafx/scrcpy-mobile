@@ -253,6 +253,11 @@ enum SessionDeviceType: String, Codable, CaseIterable {
     @objc var port: String
     @objc var sessionName: String = ""
     @objc var useTailscale: Bool = false
+
+    /// 走内嵌的 frp XTCP visitor（被控端跑 frpc，不占 VpnService，能挂代理）
+    @objc var useFrp: Bool = false
+    /// 该手机在 frpc 里 `[[proxies]]` 的 name
+    @objc var frpProxyName: String = ""
     
     var hostReal: String {
         get {
@@ -346,6 +351,9 @@ enum SessionDeviceType: String, Codable, CaseIterable {
         self.deviceId = try container.decodeIfPresent(UUID.self, forKey: .deviceId) ?? self.id
         self.sessionName = try container.decodeIfPresent(String.self, forKey: .sessionName) ?? ""
         self.useTailscale = try container.decodeIfPresent(Bool.self, forKey: .useTailscale) ?? false
+        // frp 隧道（老会话里没有这两个键，给默认值）
+        self.useFrp = try container.decodeIfPresent(Bool.self, forKey: .useFrp) ?? false
+        self.frpProxyName = try container.decodeIfPresent(String.self, forKey: .frpProxyName) ?? ""
         
         // Decode nested objects with error handling
         do {

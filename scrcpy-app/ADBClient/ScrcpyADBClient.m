@@ -287,12 +287,19 @@ void ScrcpyTryResetVideo(void) {
             NSString *tips = authTips;
             if (unreachable) {
                 BOOL usingTailscale = [arguments[@"isUsingTailscale"] boolValue];
+                BOOL usingFrp = [arguments[@"isUsingFrp"] boolValue];
                 if (usingTailscale) {
                     NSString *remoteHost = arguments[@"tailscaleRemoteHost"] ?: @"the target address";
                     NSString *remotePort = arguments[@"tailscaleRemotePort"] ?: @"";
                     NSString *remote = remotePort.length ? [NSString stringWithFormat:@"%@:%@", remoteHost, remotePort] : remoteHost;
                     tips = [NSString stringWithFormat:
                             @"\n\nTailscale could not reach %@ inside the tailnet. Make sure the Android device is joined to the same Tailscale network (or reachable via a subnet router), and that you use its Tailscale IP / MagicDNS name rather than a LAN address such as 192.168.x.x.", remote];
+                } else if (usingFrp) {
+                    NSString *remoteHost = arguments[@"frpRemoteHost"] ?: @"the target";
+                    NSString *remotePort = arguments[@"frpRemotePort"] ?: @"";
+                    NSString *remote = remotePort.length ? [NSString stringWithFormat:@"%@:%@", remoteHost, remotePort] : remoteHost;
+                    tips = [NSString stringWithFormat:
+                            @"\n\nThe frp tunnel is listening on 127.0.0.1 but %@ did not answer. On the Android device, check that frpc is still running (XTCP mode) and that its proxy name / secretKey match this session. Also check that adb over TCP (port 5555) is still enabled — it resets whenever the device reboots.", remote];
                 } else {
                     tips = @"\n\nCould not reach the device. Check that the IP/port is correct, the device is powered on and on the same network, and that wireless debugging (adb over TCP) is enabled.";
                 }

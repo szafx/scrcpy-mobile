@@ -579,10 +579,10 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
             do {
                 var connectionInfo = await SessionNetworking.shared.getConnectionInfo(for: session)
                 
-                // 如果是 Tailscale 连接且首次获取信息失败，则重试一次
-                // 仅当 Tailscale 本身拨号失败（无法获取 IP）时重试
-                if connectionInfo == nil && session.useTailscale {
-                    print("⚠️ [SessionConnectionManager] Failed to get Tailscale connection info, retrying once...")
+                // 如果是 Tailscale / frp 连接且首次获取信息失败，则重试一次
+                // 仅当隧道本身没建起来时重试（地址填错的话重试也没用，但值得再试一次打洞）
+                if connectionInfo == nil && (session.useTailscale || session.useFrp) {
+                    print("⚠️ [SessionConnectionManager] Failed to get tunnel connection info, retrying once...")
                     
                     // 停止当前转发并等待
                     _ = SessionNetworking.shared.stopForwarding(for: session.id)
@@ -622,6 +622,14 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                         sessionDict["tailscaleRemoteHost"] = finalConnectionInfo.originalHost
                         sessionDict["tailscaleRemotePort"] = finalConnectionInfo.originalPort
                         print("🔗 [SessionConnectionManager] Using Tailscale connection: \(finalConnectionInfo.originalHost):\(finalConnectionInfo.originalPort) -> \(finalConnectionInfo.host):\(finalConnectionInfo.port)")
+                    } else if finalConnectionInfo.isUsingFrp {
+                        // frp 隧道：hostReal 已经指向 127.0.0.1:<本机端口>（上面那行设过了）。
+                        // 把真实目标带上，失败时能给出有针对性的提示而不是
+                        // 那句容易误导的「去手机上点允许 USB 调试」。
+                        sessionDict["isUsingFrp"] = true
+                        sessionDict["frpRemoteHost"] = finalConnectionInfo.originalHost
+                        sessionDict["frpRemotePort"] = finalConnectionInfo.originalPort
+                        print("🔗 [SessionConnectionManager] Using frp tunnel: \(finalConnectionInfo.originalHost):\(finalConnectionInfo.originalPort) -> \(finalConnectionInfo.host):\(finalConnectionInfo.port)")
                     } else {
                         sessionDict["host"] = finalConnectionInfo.host
                         print("🔌 [SessionConnectionManager] Using direct connection: \(finalConnectionInfo.host):\(finalConnectionInfo.port)")
@@ -882,8 +890,8 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
             )
         }
         
-        // 清理端口转发
-        if isUsingTailscale {
+        // 清理端口转发（Tailscale 和 frp 都是「本机监听 + 转发」那一套）
+        if isUsingTailscale || currentSession?.useFrp == true {
             SessionNetworking.shared.stopAllForwarding()
         }
 

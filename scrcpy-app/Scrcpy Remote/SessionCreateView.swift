@@ -17,6 +17,8 @@ struct SessionCreateView: View {
     @EnvironmentObject var appSettings: AppSettings
     @State private var showingTailscaleAuth = false
     @State private var returnedFromTailscaleAuth = false
+    @State private var showingFrpSettings = false
+    @State private var returnedFromFrpSettings = false
     @State private var showingValidationError = false
     @State private var validationErrorMessage = ""
     @State private var forceVNCMode = false
@@ -28,6 +30,7 @@ struct SessionCreateView: View {
     @State private var selectedVolumeScale: Double = 1.0
     // Local state for toggles that control show/hide to ensure UI refresh
     @State private var useTailscale: Bool = false
+    @State private var useFrp: Bool = false
     @State private var enableVNCaudio: Bool = false
     @State private var enableADBaudio: Bool = false
     @State private var startNewDisplay: Bool = false
@@ -76,6 +79,7 @@ struct SessionCreateView: View {
         _selectedVolumeScale = State(initialValue: sessionModel.adbOptions.volumeScale)
         // Initialize toggle states
         _useTailscale = State(initialValue: sessionModel.useTailscale)
+        _useFrp = State(initialValue: sessionModel.useFrp)
         _enableVNCaudio = State(initialValue: sessionModel.vncOptions.enableAudio)
         _enableADBaudio = State(initialValue: sessionModel.adbOptions.enableAudio)
         _startNewDisplay = State(initialValue: sessionModel.adbOptions.startNewDisplay)
@@ -108,6 +112,9 @@ struct SessionCreateView: View {
                         .onChange(of: useTailscale) { newValue in
                             sessionModel.useTailscale = newValue
                             if newValue {
+                                // frp 和 Tailscale 二选一
+                                useFrp = false
+                                sessionModel.useFrp = false
                                 // Check if Tailscale Auth Key is set
                                 if appSettings.tailscaleAuthKey.isEmpty {
                                     // If not set, show Tailscale Auth settings
@@ -118,13 +125,6 @@ struct SessionCreateView: View {
                                 }
                             }
                         }
-
-                    if !useTailscale {
-                        Text("Please ensure you have a Tailscale account and the target device is connected to your Tailscale network.")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .padding(.top, 2)
-                    }
 
                     if useTailscale {
                         VStack(alignment: .leading, spacing: 4) {
@@ -141,7 +141,40 @@ struct SessionCreateView: View {
                         }
                         .padding(.vertical, 4)
                     }
-                    
+
+                    // 内嵌 frp XTCP（被控端跑 frpc 不占 VpnService，能挂代理）——
+                    // 和 Tailscale 二选一，所以两边互相关掉对方
+                    Toggle("Connect over frp (XTCP)", isOn: $useFrp.animation())
+                        .onChange(of: useFrp) { newValue in
+                            sessionModel.useFrp = newValue
+                            if newValue {
+                                useTailscale = false
+                                sessionModel.useTailscale = false
+                                // 全局的 frps 地址 / secretKey 没填就别开，直接跳去设置页
+                                if !FrpSettings.load().isConfigured {
+                                    showingFrpSettings = true
+                                    useFrp = false
+                                    sessionModel.useFrp = false
+                                }
+                            }
+                        }
+
+                    if useFrp {
+                        TextField("frp Proxy Name", text: $sessionModel.frpProxyName)
+                            .autocorrectionDisabled()
+                            .autocapitalization(.none)
+
+                        Text("填这台手机在 frpc 里 [[proxies]] 的 name。被控端不占 VpnService、可以挂代理；打洞成功走 P2P 直连，打不通自动经 frps 中转。")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                    } else if !useTailscale {
+                        Text("两个开关都关 = 直连（局域网 IP，或 adb://host:port）。Tailscale 需要装在手机上；手机会挂代理时用 frp。")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                    }
+
                     if effectiveDeviceType == .adb {
                         Toggle("Force Connect ADB Forward", isOn: $sessionModel.adbOptions.forceAdbForward)
                     }
@@ -443,6 +476,22 @@ struct SessionCreateView: View {
             }
             .environmentObject(appSettings)
         }
+        .sheet(isPresented: $showingFrpSettings) {
+            NavigationView {
+                FrpTunnelSettingsView()
+                    .navigationBarTitle("frp Tunnel", displayMode: .inline)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("Done") {
+                                showingFrpSettings = false
+                                returnedFromFrpSettings = true
+                            }
+                        }
+                    }
+            }
+            .environmentObject(appSettings)
+        }
         .alert("Validation Error", isPresented: $showingValidationError) {
             Button("OK") { }
         } message: {
@@ -454,8 +503,22 @@ struct SessionCreateView: View {
                 if !appSettings.tailscaleAuthKey.isEmpty {
                     useTailscale = true
                     sessionModel.useTailscale = true
+                    useFrp = false
+                    sessionModel.useFrp = false
                 }
                 returnedFromTailscaleAuth = false
+            }
+        }
+        .onChange(of: showingFrpSettings) { isShowing in
+            if !isShowing && returnedFromFrpSettings {
+                // 从 frp 设置页回来后，配置齐了就自动把开关打开
+                if FrpSettings.load().isConfigured {
+                    useFrp = true
+                    sessionModel.useFrp = true
+                    useTailscale = false
+                    sessionModel.useTailscale = false
+                }
+                returnedFromFrpSettings = false
             }
         }
         .onAppear {
@@ -575,7 +638,19 @@ struct SessionCreateView: View {
             validationErrorMessage = NSLocalizedString("Tailscale authentication is required but not configured.", comment: "Validation: tailscale not configured")
             return false
         }
-        
+
+        // Check frp tunnel configuration
+        if sessionModel.useFrp {
+            if !FrpSettings.load().isConfigured {
+                validationErrorMessage = NSLocalizedString("frp server / secret key is required but not configured. Open frp Tunnel settings first.", comment: "Validation: frp not configured")
+                return false
+            }
+            if sessionModel.frpProxyName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                validationErrorMessage = NSLocalizedString("Please enter the frp proxy name of this device.", comment: "Validation: frp proxy name empty")
+                return false
+            }
+        }
+
         return true
     }
     
