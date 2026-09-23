@@ -537,6 +537,23 @@ class SessionNetworking {
     private func findLanHost(portText: String, session: ScrcpySessionModel) async -> String? {
         guard let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return nil }
 
+        // ★ 第一步：先单独验证「这个会话上次连过的地址」。
+        //
+        //   放在最前面有两个好处：
+        //     1. 命中的话只花**一次**探测（1 秒），不用去验证一整批候选
+        //     2. 不通就当场把这条记忆删掉 —— 手机多半换 IP 了，
+        //        留着只会让**以后每次连接都白等一次探测**，而且它永远不会自己消失。
+        //        （用户提的：通了就留着、不通就该清掉）
+        if let remembered = sessionLanHosts[session.id] {
+            if await isAlive(host: remembered, port: port, timeout: 1.0) {
+                print("[LanDiscovery] 用这个会话上次的地址：\(remembered)")
+                return remembered
+            }
+            print("[LanDiscovery] 会话上次的地址 \(remembered) 已失效（手机多半换 IP 了），清掉这条记忆")
+            sessionLanHosts.removeValue(forKey: session.id)
+            persistCaches()
+        }
+
         // 先看缓存：对上次见过（或上次扫到）的地址做一次**真实往返**验证，活的才留下。
         //
         // ★ 这里**不看时间戳** —— 缓存可能是从磁盘恢复出来的（App 刚重启，
@@ -577,12 +594,6 @@ class SessionNetworking {
         guard !candidates.isEmpty else { return nil }
 
         // ① 这个会话上次连过的地址，只要还在候选里就直接用
-        if let remembered = sessionLanHosts[session.id],
-           candidates.contains(where: { $0.host == remembered }) {
-            print("[LanDiscovery] 用这个会话上次的地址：\(remembered)")
-            return remembered
-        }
-
         // ② 只有一台，不用问
         if candidates.count == 1 {
             let host = candidates[0].host
