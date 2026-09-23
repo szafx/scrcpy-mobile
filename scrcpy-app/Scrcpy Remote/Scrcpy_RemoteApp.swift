@@ -42,6 +42,11 @@ struct Scrcpy_RemoteApp: App {
                     
                     // 初始化 Live Activity 支持
                     initializeLiveActivitySupport()
+
+                    // 后台扫一遍局域网找手机的 adb 端口。
+                    // 扫一遍网段要 1~2 秒，放在这里预热，等用户点连接时直接命中缓存，
+                    // 不会让连接多等；扫不到（不在同一 WiFi）也不影响，会自然落到 frp。
+                    SessionNetworking.shared.warmUpLanDiscovery()
                 }
                 // 注册通知中心观察者，监听前后台切换
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in

@@ -58,24 +58,24 @@ class SessionNetworking {
         let originalHost = session.hostReal
         let originalPort = session.port
 
-        // ★ 三级降级的第一级：Host 只要连得上就直接走它（局域网最快）。
+        // ★ 三级降级的第一级：自动找局域网里的手机。
+        //
+        //   注意这里**不需要用户填任何 IP** —— 手机在局域网里的地址是 DHCP 分的、
+        //   随时会变，让用户手填等于让他维护一份会过期的表，那「优先走局域网」就是假的。
+        //   所以自己扫：先查缓存（0.5s 探测），没命中再扫一遍网段。
         //
         //   必须放在 frp / Tailscale **之前** —— 否则勾了隧道开关就永远走隧道，
-        //   明明在家连着同一个 WiFi，也要绕出去一趟，白白多几十毫秒。
-        //
-        //   探测超时很短（0.8s），连不上立刻落到下一级，不会拖慢连接。
-        //   所以 Host 应该填**手机在局域网里的地址**（比如 192.168.167.169），
-        //   出家门连不上时自然就落到 frp 了。
+        //   明明在家连着同一个 WiFi 也要绕出去，白白多几十毫秒。
         if session.useFrp || session.useTailscale,
-           await isReachable(host: originalHost, portText: originalPort, timeout: 0.8) {
-            print("[SessionNetworking] \(originalHost):\(originalPort) 可达 —— 直接走局域网，跳过隧道")
+           let lanHost = await findLanHost(portText: originalPort, session: session) {
+            print("[SessionNetworking] 局域网里发现目标 \(lanHost):\(originalPort) —— 直连，跳过隧道")
             statusUpdateCallback?("Using LAN (direct)")
             return NetworkConnectionInfo(
-                host: originalHost,
+                host: lanHost,
                 port: originalPort,
                 isUsingTailscale: false,
                 isUsingFrp: false,
-                originalHost: originalHost,
+                originalHost: lanHost,
                 originalPort: originalPort,
                 localForwardPort: nil
             )
@@ -381,10 +381,138 @@ class SessionNetworking {
         return false
     }
 
+    // MARK: - 局域网自动发现
+
+    /// 上次扫描的结果和时刻。扫一遍网段要 1~2 秒，不能每次连接都扫。
+    private var lanScanCache: [LanDiscovery.Candidate] = []
+    private var lanScanAt: Date?
+    /// 缓存有效期 —— 过期就重扫（手机换了 IP、或者换了 WiFi）
+    private let lanScanTTL: TimeInterval = 300
+
+    /// 后台预热：App 一起来就扫一遍，真正连接时直接命中缓存、不额外等。
+    func warmUpLanDiscovery(port: UInt16 = 5555) {
+        Task { _ = await discoverLan(port: port) }
+    }
+
+    /// 返回局域网里属于**这台设备**的地址；不在局域网（或认不出来）就返回 nil。
+    ///
+    /// 多设备匹配（局域网里可能同时有好几台手机）：
+    ///   1. 只有一台候选 → 直接用它（没有歧义）
+    ///   2. 多台 → 逐个用 adb 连上去读序列号，和会话 frp proxy 名里的序号段对上才算
+    ///   3. 认不出来 → 返回 nil，**不猜**，让调用方落到 frp/Tailscale
+    private func findLanHost(portText: String, session: ScrcpySessionModel) async -> String? {
+        guard let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else { return nil }
+
+        // 先看缓存：对上次扫到的地址快速探一下（0.5s），通的直接进匹配
+        var candidates = lanScanCache
+        if let scannedAt = lanScanAt, Date().timeIntervalSince(scannedAt) < lanScanTTL {
+            let alive = await withTaskGroup(of: (LanDiscovery.Candidate, Bool).self) { group -> [LanDiscovery.Candidate] in
+                for candidate in candidates {
+                    group.addTask {
+                        (candidate, await self.isReachable(host: candidate.host, portText: portText, timeout: 0.5))
+                    }
+                }
+                var hits: [LanDiscovery.Candidate] = []
+                for await (candidate, ok) in group {
+                    if ok { hits.append(candidate) }
+                }
+                return hits
+            }
+            candidates = alive
+        } else {
+            candidates = []
+        }
+
+        // 缓存没命中就重扫一遍
+        if candidates.isEmpty {
+            candidates = await discoverLan(port: port)
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        if candidates.count == 1 {
+            return candidates.first?.host
+        }
+
+        // 多台：逐个查序列号认人
+        print("[LanDiscovery] 局域网里有 \(candidates.count) 台，逐个查序列号匹配…")
+        return await matchTargetDevice(candidates, session: session, port: port)
+    }
+
+    /// 逐个 adb 连上去读序列号，找出哪一台是会话要的那台。
+    ///
+    /// 判据用的是 **frp proxy 名的最后一段**（部署脚本 deploy-frpc.py 的命名规则：
+    /// `phone-<型号>-<序列号后4位>`），所以会话必须填过 frpProxyName。
+    /// 填不出来就返回 nil —— 宁可不走局域网，也不能连错设备。
+    private func matchTargetDevice(_ candidates: [LanDiscovery.Candidate],
+                                   session: ScrcpySessionModel,
+                                   port: UInt16) async -> String? {
+        guard let suffix = Self.serialSuffix(from: session.frpProxyName), suffix.count >= 4 else {
+            print("[LanDiscovery] 会话里没有可用的设备标识（frp proxy 名），多台时不猜，走隧道")
+            return nil
+        }
+
+        let matched = await withTaskGroup(of: (String, String?).self) { group -> String? in
+            for candidate in candidates {
+                group.addTask {
+                    (candidate.host, await Self.readSerialNumber(host: candidate.host, port: port))
+                }
+            }
+            for await (host, serial) in group {
+                if let serial, serial.hasSuffix(suffix) {
+                    return host
+                }
+            }
+            return nil
+        }
+
+        if let matched {
+            print("[LanDiscovery] 匹配到目标设备：\(matched)（序列号后缀 \(suffix)）")
+        } else {
+            print("[LanDiscovery] \(candidates.count) 台里没有一台匹配后缀 \(suffix)")
+        }
+        return matched
+    }
+
+    /// 从 `phone-COR-AL10-1911` 里取出 `1911`
+    private static func serialSuffix(from proxyName: String) -> String? {
+        let trimmed = proxyName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.split(separator: "-").last.map(String.init)
+    }
+
+    /// adb connect 上某台候选，读它的序列号。
+    ///
+    /// 用的是 App 自己那份 adbkey（已导入过被控端的授权列表），所以不会弹授权窗。
+    private static func readSerialNumber(host: String, port: UInt16) async -> String? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let target = "\(host):\(port)"
+                let client = ADBClient.shared()
+                _ = client.executeADBCommand(["connect", target], returnCode: nil)
+                var rc: Int32 = 0
+                let output = client.executeADBCommand(
+                    ["-s", target, "shell", "getprop", "ro.serialno"],
+                    returnCode: &rc
+                )
+                let serial = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                continuation.resume(returning: (rc == 0 && !serial.isEmpty) ? serial : nil)
+            }
+        }
+    }
+
+    private func discoverLan(port: UInt16) async -> [LanDiscovery.Candidate] {
+        if let scannedAt = lanScanAt, Date().timeIntervalSince(scannedAt) < lanScanTTL, !lanScanCache.isEmpty {
+            return lanScanCache
+        }
+        let found = await LanDiscovery.discover(port: port)
+        lanScanCache = found
+        lanScanAt = Date()
+        return found
+    }
+
     /// 目标地址能不能连上（用来判断「现在是不是和手机在同一个局域网」）。
     ///
-    /// 用 NWConnection 而不是裸 socket：它天生异步、带状态回调，
-    /// 超时也好控制（这里给的很短，连不上要立刻落到下一级隧道）。
+    /// 用 NWConnection 而不是裸 socket：它天生异步、带状态回调，超时也好控制。
     private func isReachable(host: String, portText: String, timeout: TimeInterval) async -> Bool {
         let trimmedHost = host.trimmingCharacters(in: .whitespaces)
         guard !trimmedHost.isEmpty, !trimmedHost.hasPrefix("frp") else { return false }
