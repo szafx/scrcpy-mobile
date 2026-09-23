@@ -106,6 +106,7 @@ final class LatencyMonitor: ObservableObject {
         guard let host = manager.actualHost,
               let portText = manager.actualPort,
               let port = UInt16(portText.trimmingCharacters(in: .whitespaces)) else {
+            print("[LatencyMonitor] 还没有连接信息（host=\(manager.actualHost ?? "nil") port=\(manager.actualPort ?? "nil")），这次跳过")
             return
         }
 
@@ -114,11 +115,17 @@ final class LatencyMonitor: ObservableObject {
         // 后者等的是「对方回数据」，而 adbd 收到非协议字节只关连接、不回内容，
         // 实测每次都 "Failed to receive response"，气泡上的延迟一直出不来。
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let ms = LanDiscovery.measureRoundTrip(host: host, port: port, timeout: 4) else {
-                return
-            }
+            let ms = LanDiscovery.measureRoundTrip(host: host, port: port, timeout: 3)
             DispatchQueue.main.async {
-                self?.record(ms)
+                guard let self else { return }
+                if let ms {
+                    print(String(format: "[LatencyMonitor] %@:%d -> %.1f ms", host, port, ms))
+                    self.record(ms)
+                } else {
+                    // 打日志，别静默 —— 上一版就是静默 return，导致用户日志里
+                    // 完全看不出延迟到底测没测、卡在哪一步。
+                    print("[LatencyMonitor] 探测失败（\(host):\(port)）")
+                }
             }
         }
     }

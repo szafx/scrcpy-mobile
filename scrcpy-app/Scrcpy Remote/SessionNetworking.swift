@@ -44,6 +44,29 @@ class SessionNetworking {
     /// 当前哪条会话在用内嵌 frp 隧道（同一时刻只跑一条 —— libfrp 的 C 接口就是单例）
     private var activeFrpSession: UUID?
 
+    // MARK: - 局域网失败回落
+
+    /// 本次连接是不是走的局域网直连。
+    ///
+    /// 用途：局域网这条路有个**竞态** —— 存活验证通过之后、真正连上之前，
+    /// WiFi 可能刚好断掉，于是直连失败。这种失败不该让用户手动重试，
+    /// 应该自动改走隧道（隧道本来就能通）。
+    private(set) var lastAttemptWasLAN = false
+
+    /// 已经回落到隧道重试过一次。只回落一次，避免来回循环。
+    private var didFallbackToTunnel = false
+
+    /// 让下一次连接强制跳过局域网那一级。
+    func skipLANOnNextAttempt() {
+        didFallbackToTunnel = true
+    }
+
+    /// 用户主动发起新连接时调用，清掉上次的回落痕迹。
+    func resetLANFallbackState() {
+        didFallbackToTunnel = false
+        lastAttemptWasLAN = false
+    }
+
     // Status callback for UI updates (e.g., "Regenerating auth key...")
     var statusUpdateCallback: ((String) -> Void)?
 
@@ -66,14 +89,22 @@ class SessionNetworking {
         //
         //   必须放在 frp / Tailscale **之前** —— 否则勾了隧道开关就永远走隧道，
         //   明明在家连着同一个 WiFi 也要绕出去，白白多几十毫秒。
-        if session.useFrp || session.useTailscale {
+        // ★ 一次性读取「这次要不要跳过局域网」，读完立刻复位 ——
+        //   否则一次回落会让**之后每一次**连接都不走局域网了。
+        let skipLAN = didFallbackToTunnel
+        didFallbackToTunnel = false
+
+        if session.useFrp || session.useTailscale, !skipLAN {
             // 先告诉用户在扫局域网 —— 扫描要一两秒，不给提示会像卡住了
             statusUpdateCallback?("正在扫描局域网，寻找可直连的设备…")
         }
-        if session.useFrp || session.useTailscale,
+        if session.useFrp || session.useTailscale, !skipLAN,
            let lanHost = await findLanHost(portText: originalPort, session: session) {
             print("[SessionNetworking] 局域网里发现目标 \(lanHost):\(originalPort) —— 直连，跳过隧道")
             statusUpdateCallback?("已找到局域网设备，正在直连…")
+            // 记下来：万一这个直连因为「验证之后 WiFi 刚好断掉」而失败，
+            // 连接管理器会据此自动改走隧道重试（见 lastAttemptWasLAN）。
+            lastAttemptWasLAN = true
             return NetworkConnectionInfo(
                 host: lanHost,
                 port: originalPort,
@@ -84,6 +115,8 @@ class SessionNetworking {
                 localForwardPort: nil
             )
         }
+        // 走到这儿说明这次不走局域网（不在 WiFi / 认不出来 / 已经回落过）
+        lastAttemptWasLAN = false
 
         // frp XTCP：被控端不占 VpnService（要挂代理），App 端也不占 VPN 槽
         if session.useFrp {

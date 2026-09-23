@@ -383,7 +383,25 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
             case ScrcpyStatusConnectingFailed:
                 print("❌ [SessionConnectionManager] Status: Connection Failed")
                 self.isConnecting = false
-                
+
+                // ★ 局域网直连失败 → 自动改走隧道再试一次。
+                //
+                //   局域网那条路有个**竞态**：存活验证通过之后、真正连上之前，
+                //   WiFi 可能刚好断掉。用户实测就是这种 —— 日志里
+                //   「用这个会话上次的地址」之后紧接着就是直连失败。
+                //   这种失败不该让用户手动重试：隧道本来就能通。
+                //
+                //   只回落一次（skipLANOnNextAttempt 会让下次连接跳过局域网那一级），
+                //   避免失败-回落-再失败来回循环。
+                if SessionNetworking.shared.lastAttemptWasLAN, !isAutoReconnecting {
+                    print("[AutoReconnect] 局域网直连失败 —— 自动改走隧道重试一次")
+                    SessionNetworking.shared.skipLANOnNextAttempt()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        guard let self, let session = self.currentSession else { return }
+                        self.performAutoReconnect(session)
+                    }
+                }
+
                 // 错误信息现在通过状态回调传递到 ConnectionStatusView，不再调用错误回调
                 if let errorMessage = statusMessage, !errorMessage.isEmpty {
                     print("📝 [SessionConnectionManager] Error message: \(errorMessage)")
