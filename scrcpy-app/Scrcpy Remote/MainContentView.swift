@@ -11,14 +11,10 @@ struct MainContentView: View {
     @StateObject private var connectionManager = SessionConnectionManager.shared
     
     @State private var selectedTab = 0
-    @State private var isSettingsPresented = false
     @State private var isSessionCreatePresented = false
-    @State private var isNewActionPresented = false
     @State private var editingSession: ScrcpySession? = nil
     @State private var savedSessions: [ScrcpySession] = []
     @State private var currentStatusMessage: String?
-    @State private var isNavigationBarHidden: Bool = false
-    @State private var shouldShowNavigationBarAfterDismiss: Bool = false
     @State private var userDismissedConnection: Bool = false
     @State private var showMigrationAlert: Bool = false
     @State private var legacyDeviceInfo: (host: String, port: String)?
@@ -156,444 +152,162 @@ struct MainContentView: View {
     }
 
     var body: some View {
-        if #available(iOS 16.0, *) {
-            NavigationStack {
-                TabView(selection: $selectedTab) {
-                    SessionsView(savedSessions: $savedSessions, onDeleteSession: { id in
-                        print("Deleting session:", id)
-                        SessionManager.shared.deleteSession(id: id)
-                        reloadSessions()
-                    }, onConnectSession: { session in
-                        connectToSession(session)
-                    }, onEditSession: { session in
-                        print("Editing session:", session.title)
-                        editingSession = session
-                    }, onDuplicateSession: { duplicatedSession in
-                        print("Duplicating session:", duplicatedSession.title)
-                        SessionManager.shared.saveSession(duplicatedSession.sessionModel)
-                        reloadSessions()
-                    })
-                        .tabItem {
-                            Image(systemName: "rectangle.stack")
-                            Text("Sessions")
-                        }
-                        .tag(0)
-                    ActionsView()
-                        .tabItem {
-                            Image(systemName: "play.square.stack.fill")
-                            Text("Actions")
-                        }
-                        .tag(1)
-                }
-                .navigationTitle(
-                    selectedTab == 0 ? "Scrcpy Sessions" : "Scrcpy Actions"
-                )
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button(action: {
-                            isSettingsPresented.toggle()
-                        }) {
-                            Image(systemName: "gear")
-                        }
-                        .disabled(connectionManager.isConnecting)
-                    }
-                    ToolbarItem(placement: .navigationBarTrailing) {
-                        Button(action: {
-                            if selectedTab == 0 {
-                                isSessionCreatePresented.toggle()
-                            } else if selectedTab == 1 {
-                                isNewActionPresented.toggle()
-                            }
-                        }) {
-                            Image(systemName: "plus")
-                        }
-                        .disabled(connectionManager.isConnecting)
-                    }
-                }
-                .navigationBarHidden(isNavigationBarHidden)
-                .sheet(isPresented: $isSettingsPresented) {
-                    SettingsView()
-                        .environmentObject(appSettings)
-                }
-                .sheet(isPresented: $isSessionCreatePresented, onDismiss: {
-                    editingSession = nil
-                    reloadSessions()
-                }) {
-                    SessionCreateView()
-                        .environmentObject(appSettings)
-                }
-                .sheet(isPresented: $isNewActionPresented) {
-                    NewActionView { action in
-                        ActionManager.shared.saveAction(action)
-                    }
-                }
-                .sheet(item: $editingSession, onDismiss: {
-                    editingSession = nil
-                    reloadSessions()
-                }) { item in
-                    SessionCreateView(sessionModel: item.sessionModel)
-                        .environmentObject(appSettings)
-                }
-                .overlay {
-                    if shouldShowConnectionStatusView {
-                        ConnectionStatusView(
-                            session: ScrcpySession(sessionModel: connectionManager.currentSession ?? ScrcpySessionModel()),
-                            connectionStatus: connectionManager.connectionStatus,
-                            statusMessage: currentStatusMessage,
-                            onCancel: {
-                                print("🚫 [MainContentView] User dismissed connection, restoring navigation bar")
-                                
-                                // 立即设置用户关闭标志，强制隐藏连接状态视图
-                                userDismissedConnection = true
-                                
-                                withAnimation(.easeInOut(duration: 0.3)) {
-                                    isNavigationBarHidden = false
-                                }
-                                currentStatusMessage = nil
-                                
-                                // 断开连接并清理会话状态
-                                SessionConnectionManager.shared.disconnectCurrent()
-                                
-                                // 对于连接失败的情况，需要手动清理会话状态
-                                if connectionManager.connectionStatus == ScrcpyStatusConnectingFailed {
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                        SessionConnectionManager.shared.clearCurrentSession()
-                                    }
-                                }
-                            }
-                        )
-                        .transition(.opacity.combined(with: .scale))
-                        .animation(.easeInOut(duration: 0.3), value: shouldShowConnectionStatusView)
-                    }
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .startSchemeConnection)) { notification in
-                    guard let session = notification.userInfo?["session"] as? ScrcpySessionModel else {
-                        print("❌ [MainContentView] No session found in scheme connection notification")
-                        return
-                    }
-                    
-                    print("🔗 [MainContentView] Received scheme connection request for: \(session.host):\(session.port)")
-                    
-                    let scrcpySession = ScrcpySession(sessionModel: session)
-                    connectToSession(scrcpySession)
-                    
-                    selectedTab = 0
-                }
-                .onAppear {
-                    if savedSessions.isEmpty {
-                        reloadSessions()
-                    }
-                    checkForMigration()
-                }
-                // Session store mutated outside this view (e.g. the DEBUG
-                // harness RPC writing through SessionManager) — re-read it.
-                .onReceive(NotificationCenter.default.publisher(
-                    for: Notification.Name("ScrcpySessionStoreChanged"))) { _ in
-                    reloadSessions()
-                }
-                .onChange(of: connectionManager.isConnecting) { isConnecting in
-                    if isConnecting {
-                        isNavigationBarHidden = true
-                    }
-                    
-                    if !isConnecting && connectionManager.connectionStatus != ScrcpyStatusConnectingFailed {
-                        print("🧹 [MainContentView] Auto-clearing currentStatusMessage (not in failure state)")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            currentStatusMessage = nil
-                            print("🧹 [MainContentView] currentStatusMessage cleared")
-                        }
-                    } else if !isConnecting && connectionManager.connectionStatus == ScrcpyStatusConnectingFailed {
-                        print("⚠️ [MainContentView] Not auto-clearing currentStatusMessage (in failure state)")
-                    }
-                }
-                .onChange(of: connectionManager.connectionStatus) { newStatus in
-                    print("🔄 [MainContentView] Connection status changed to: \(newStatus.description)")
-                    print("🔄 [MainContentView] Current currentStatusMessage: \(currentStatusMessage ?? "nil")")
-                    
-                    switch newStatus {
-                    case ScrcpyStatusSDLWindowAppeared:
-                        print("✅ [MainContentView] SDL Window appeared, restoring navigation bar and hiding status view")
-                        isNavigationBarHidden = false
-                        userDismissedConnection = false // 重置用户关闭标志
-                        // 投屏画面出来了 —— 把「走哪条路 + 延迟」的气泡浮到画面之上
-                        LatencyBadgeWindow.shared.show()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            currentStatusMessage = nil
-                            print("🧹 [MainContentView] currentStatusMessage cleared after SDL window appeared")
-                        }
-                        
-                    case ScrcpyStatusConnected:
-                        print("✅ [MainContentView] Connection successful, preparing to hide status view")
-                        // 连接成功就把「走哪条路 + 延迟」的气泡浮上去。
-                        // ★ 别只等 SDLWindowAppeared(7) —— 那个状态**只有 VNC 那条路会发**
-                        //   （见 ScrcpyVNCRuntime.m），scrcpy/ADB 模式压根不发，
-                        //   挂在那儿的话气泡永远不出现。
-                        LatencyBadgeWindow.shared.show()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            currentStatusMessage = nil
-                            print("🧹 [MainContentView] currentStatusMessage cleared after connection success")
-                        }
-                        
-                    case ScrcpyStatusConnectingFailed:
-                        print("❌ [MainContentView] Connection failed, waiting for user to dismiss")
-                        print("❌ [MainContentView] Current currentStatusMessage: \(currentStatusMessage ?? "nil")")
-                        isNavigationBarHidden = true
-                        LatencyBadgeWindow.shared.hide()
-                        
-                        // 不自动清除状态消息，等待用户点击 dismiss 按钮
-                        
-                    case ScrcpyStatusDisconnected:
-                        print("🔌 [MainContentView] Connection disconnected, restoring navigation bar and cleaning up")
-                        isNavigationBarHidden = false
-                        userDismissedConnection = false // 重置用户关闭标志
-                        currentStatusMessage = nil
-                        // 回到主页 = 这次连接结束：收掉浮层并**禁止它再冒出来**。
-                        // 网络后面再怎么变，也不该有一条「正在重连」浮在主页上
-                        // （用户要求：回主页就不能自动重连了，只能手动去连）。
-                        LatencyBadgeWindow.shared.suppressAndHide()
-                        print("🧹 [MainContentView] currentStatusMessage cleared after disconnect")
-                        
-                    default:
-                        break
-                    }
-                }
-                // Migration prompt
-                .alert("Legacy Data Found", isPresented: $showMigrationAlert) {
-                    Button("Migrate") {
-                        performMigration()
-                    }
-                    Button("Skip", role: .cancel) {
-                        declineMigration()
-                    }
-                } message: {
-                    if let deviceInfo = legacyDeviceInfo {
-                        Text("We found device settings from the previous versions:\n\n📱 Device: \(deviceInfo.host):\(deviceInfo.port)\n\nWould you like to migrate this device to the new app? A new ADB device will be created with your previous settings.")
-                    } else {
-                        Text("We found settings from the previous versions. Would you like to migrate them to the new version?")
-                    }
-                }
+        RootShellView(
+            selectedTab: $selectedTab,
+            savedSessions: $savedSessions,
+            onConnectSession: { session in
+                connectToSession(session)
+            },
+            onDeleteSession: { id in
+                print("Deleting session:", id)
+                SessionManager.shared.deleteSession(id: id)
+                reloadSessions()
+            },
+            onEditSession: { session in
+                print("Editing session:", session.title)
+                editingSession = session
+            },
+            onDuplicateSession: { session in
+                print("Duplicating session:", session.title)
+                SessionManager.shared.saveSession(session.sessionModel)
+                reloadSessions()
+            },
+            onCreateSession: {
+                isSessionCreatePresented = true
             }
-        } else {
-            NavigationView {
-                TabView(selection: $selectedTab) {
-                    SessionsView(savedSessions: $savedSessions, onDeleteSession: { id in
-                        print("Deleting session:", id)
-                        SessionManager.shared.deleteSession(id: id)
-                        reloadSessions()
-                    }, onConnectSession: { session in
-                        connectToSession(session)
-                    }, onEditSession: { session in
-                        print("Editing session:", session.title)
-                        editingSession = session
-                    }, onDuplicateSession: { duplicatedSession in
-                        print("Duplicating session:", duplicatedSession.title)
-                        SessionManager.shared.saveSession(duplicatedSession.sessionModel)
-                        reloadSessions()
-                    })
-                        .tabItem {
-                            Image(systemName: "rectangle.stack")
-                            Text("Sessions")
-                        }
-                        .tag(0)
-                    ActionsView()
-                        .tabItem {
-                            if #available(iOS 15.0, *) {
-                                Image(systemName: "play.rectangle.on.rectangle.fill")
-                            } else {
-                                Image(systemName: "play.rectangle.on.rectangle")
-                            }
-                            Text("Actions")
-                        }
-                        .tag(1)
-                }
-                .navigationBarTitle(
-                    selectedTab == 0 ? "Scrcpy Sessions" : "Scrcpy Actions",
-                    displayMode: .inline
-                )
-                .navigationBarItems(leading: Button(action: {
-                    isSettingsPresented.toggle()
-                }) {
-                    Image(systemName: "gear")
-                }.disabled(connectionManager.isConnecting), trailing: Button(action: {
-                    if selectedTab == 0 {
-                        isSessionCreatePresented.toggle()
-                    } else if selectedTab == 1 {
-                        isNewActionPresented.toggle()
-                    }
-                }) {
-                    Image(systemName: "plus")
-                }.disabled(connectionManager.isConnecting))
-                .navigationBarHidden(isNavigationBarHidden)
-                .sheet(isPresented: $isSettingsPresented) {
-                    SettingsView()
-                        .environmentObject(appSettings)
-                }
-                .sheet(isPresented: $isSessionCreatePresented, onDismiss: {
-                    editingSession = nil
-                    reloadSessions()
-                }) {
-                    SessionCreateView()
-                        .environmentObject(appSettings)
-                }
-                .sheet(isPresented: $isNewActionPresented) {
-                    NewActionView { action in
-                        ActionManager.shared.saveAction(action)
-                    }
-                }
-                .sheet(item: $editingSession, onDismiss: {
-                    editingSession = nil
-                    reloadSessions()
-                }) { item in
-                    SessionCreateView(sessionModel: item.sessionModel)
-                        .environmentObject(appSettings)
-                }
-                .overlay {
-                    if shouldShowConnectionStatusView {
-                        ConnectionStatusView(
-                            session: ScrcpySession(sessionModel: connectionManager.currentSession ?? ScrcpySessionModel()),
-                            connectionStatus: connectionManager.connectionStatus,
-                            statusMessage: currentStatusMessage,
-                            onCancel: {
-                                print("🚫 [MainContentView] User dismissed connection, restoring navigation bar")
-                                
-                                // 立即设置用户关闭标志，强制隐藏连接状态视图
-                                userDismissedConnection = true
-                                
-                                withAnimation(.easeInOut(duration: 0.3)) {
-                                    isNavigationBarHidden = false
-                                }
-                                currentStatusMessage = nil
-                                
-                                // 断开连接并清理会话状态
-                                SessionConnectionManager.shared.disconnectCurrent()
-                                
-                                // 对于连接失败的情况，需要手动清理会话状态
-                                if connectionManager.connectionStatus == ScrcpyStatusConnectingFailed {
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                        SessionConnectionManager.shared.clearCurrentSession()
-                                    }
-                                }
-                            }
-                        )
-                        .transition(.opacity.combined(with: .scale))
-                        .animation(.easeInOut(duration: 0.3), value: shouldShowConnectionStatusView)
-                    }
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .startSchemeConnection)) { notification in
-                    guard let session = notification.userInfo?["session"] as? ScrcpySessionModel else {
-                        print("❌ [MainContentView] No session found in scheme connection notification")
-                        return
-                    }
-                    
-                    print("🔗 [MainContentView] Received scheme connection request for: \(session.host):\(session.port)")
-                    
-                    let scrcpySession = ScrcpySession(sessionModel: session)
-                    connectToSession(scrcpySession)
-                    
-                    selectedTab = 0
-                }
-                .onAppear {
-                    if savedSessions.isEmpty {
-                        reloadSessions()
-                    }
-                    checkForMigration()
-                }
-                // Session store mutated outside this view (e.g. the DEBUG
-                // harness RPC writing through SessionManager) — re-read it.
-                .onReceive(NotificationCenter.default.publisher(
-                    for: Notification.Name("ScrcpySessionStoreChanged"))) { _ in
-                    reloadSessions()
-                }
-                .onChange(of: connectionManager.isConnecting) { isConnecting in
-                    if isConnecting {
-                        isNavigationBarHidden = true
-                    }
-                    
-                    if !isConnecting && connectionManager.connectionStatus != ScrcpyStatusConnectingFailed {
-                        print("🧹 [MainContentView] Auto-clearing currentStatusMessage (not in failure state)")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            currentStatusMessage = nil
-                            print("🧹 [MainContentView] currentStatusMessage cleared")
-                        }
-                    } else if !isConnecting && connectionManager.connectionStatus == ScrcpyStatusConnectingFailed {
-                        print("⚠️ [MainContentView] Not auto-clearing currentStatusMessage (in failure state)")
-                    }
-                }
-                .onChange(of: connectionManager.connectionStatus) { newStatus in
-                    print("🔄 [MainContentView] Connection status changed to: \(newStatus.description)")
-                    print("🔄 [MainContentView] Current currentStatusMessage: \(currentStatusMessage ?? "nil")")
-                    
-                    switch newStatus {
-                    case ScrcpyStatusSDLWindowAppeared:
-                        print("✅ [MainContentView] SDL Window appeared, restoring navigation bar and hiding status view")
-                        isNavigationBarHidden = false
-                        userDismissedConnection = false // 重置用户关闭标志
-                        // 投屏画面出来了 —— 把「走哪条路 + 延迟」的气泡浮到画面之上
-                        LatencyBadgeWindow.shared.show()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            currentStatusMessage = nil
-                            print("🧹 [MainContentView] currentStatusMessage cleared after SDL window appeared")
-                        }
-                        
-                    case ScrcpyStatusConnected:
-                        print("✅ [MainContentView] Connection successful, preparing to hide status view")
-                        // 连接成功就把「走哪条路 + 延迟」的气泡浮上去。
-                        // ★ 别只等 SDLWindowAppeared(7) —— 那个状态**只有 VNC 那条路会发**
-                        //   （见 ScrcpyVNCRuntime.m），scrcpy/ADB 模式压根不发，
-                        //   挂在那儿的话气泡永远不出现。
-                        LatencyBadgeWindow.shared.show()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            currentStatusMessage = nil
-                            print("🧹 [MainContentView] currentStatusMessage cleared after connection success")
-                        }
-                        
-                    case ScrcpyStatusConnectingFailed:
-                        print("❌ [MainContentView] Connection failed, waiting for user to dismiss")
-                        print("❌ [MainContentView] Current currentStatusMessage: \(currentStatusMessage ?? "nil")")
-                        isNavigationBarHidden = true
-                        LatencyBadgeWindow.shared.hide()
-                        
-                        // 不自动清除状态消息，等待用户点击 dismiss 按钮
-                        
-                    case ScrcpyStatusDisconnected:
-                        print("🔌 [MainContentView] Connection disconnected, restoring navigation bar and cleaning up")
-                        isNavigationBarHidden = false
-                        userDismissedConnection = false // 重置用户关闭标志
+        )
+        .sheet(isPresented: $isSessionCreatePresented, onDismiss: {
+            editingSession = nil
+            reloadSessions()
+        }) {
+            SessionCreateView()
+                .environmentObject(appSettings)
+        }
+        .sheet(item: $editingSession, onDismiss: {
+            editingSession = nil
+            reloadSessions()
+        }) { item in
+            SessionCreateView(sessionModel: item.sessionModel)
+                .environmentObject(appSettings)
+        }
+        .overlay {
+            if shouldShowConnectionStatusView {
+                ConnectionStatusView(
+                    session: ScrcpySession(sessionModel: connectionManager.currentSession ?? ScrcpySessionModel()),
+                    connectionStatus: connectionManager.connectionStatus,
+                    statusMessage: currentStatusMessage,
+                    onCancel: {
+                        print("🚫 [MainContentView] User dismissed connection")
+
+                        // 立即设置用户关闭标志，强制隐藏连接状态视图
+                        userDismissedConnection = true
                         currentStatusMessage = nil
-                        // 回到主页 = 这次连接结束：收掉浮层并**禁止它再冒出来**。
-                        // 网络后面再怎么变，也不该有一条「正在重连」浮在主页上
-                        // （用户要求：回主页就不能自动重连了，只能手动去连）。
-                        LatencyBadgeWindow.shared.suppressAndHide()
-                        print("🧹 [MainContentView] currentStatusMessage cleared after disconnect")
-                        
-                    default:
-                        break
-                    }
-                }
-                // Migration prompt
-                .alert(isPresented: $showMigrationAlert) {
-                    let title = "Legacy Data Found"
-                    let message: String
-                    if let deviceInfo = legacyDeviceInfo {
-                        message = "We found device settings from the previous scrcpy-ios app:\n\n📱 Device: \(deviceInfo.host):\(deviceInfo.port)\n\nWould you like to migrate this device to the new app? A new ADB device will be created with your previous settings."
-                    } else {
-                        message = "We found settings from the previous scrcpy-ios app. Would you like to migrate them to the new version?"
-                    }
-                    
-                    return Alert(
-                        title: Text(title),
-                        message: Text(message),
-                        primaryButton: .default(Text("Migrate")) {
-                            performMigration()
-                        },
-                        secondaryButton: .cancel(Text("Skip")) {
-                            declineMigration()
+
+                        // 断开连接并清理会话状态
+                        SessionConnectionManager.shared.disconnectCurrent()
+
+                        // 对于连接失败的情况，需要手动清理会话状态
+                        if connectionManager.connectionStatus == ScrcpyStatusConnectingFailed {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                SessionConnectionManager.shared.clearCurrentSession()
+                            }
                         }
-                    )
-                }
+                    }
+                )
+                .transition(.opacity.combined(with: .scale))
+                .animation(.easeInOut(duration: 0.3), value: shouldShowConnectionStatusView)
             }
-            .navigationViewStyle(StackNavigationViewStyle())
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .startSchemeConnection)) { notification in
+            guard let session = notification.userInfo?["session"] as? ScrcpySessionModel else {
+                print("❌ [MainContentView] No session found in scheme connection notification")
+                return
+            }
+
+            print("🔗 [MainContentView] Received scheme connection request for: \(session.host):\(session.port)")
+
+            let scrcpySession = ScrcpySession(sessionModel: session)
+            connectToSession(scrcpySession)
+
+            selectedTab = 0
+        }
+        .onAppear {
+            if savedSessions.isEmpty {
+                reloadSessions()
+            }
+            checkForMigration()
+        }
+        // Session store mutated outside this view (e.g. the DEBUG
+        // harness RPC writing through SessionManager) — re-read it.
+        .onReceive(NotificationCenter.default.publisher(
+            for: Notification.Name("ScrcpySessionStoreChanged"))) { _ in
+            reloadSessions()
+        }
+        .onChange(of: connectionManager.isConnecting) { isConnecting in
+            if !isConnecting && connectionManager.connectionStatus != ScrcpyStatusConnectingFailed {
+                print("🧹 [MainContentView] Auto-clearing currentStatusMessage (not in failure state)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    currentStatusMessage = nil
+                    print("🧹 [MainContentView] currentStatusMessage cleared")
+                }
+            } else if !isConnecting && connectionManager.connectionStatus == ScrcpyStatusConnectingFailed {
+                print("⚠️ [MainContentView] Not auto-clearing currentStatusMessage (in failure state)")
+            }
+        }
+        .onChange(of: connectionManager.connectionStatus) { newStatus in
+            print("🔄 [MainContentView] Connection status changed to: \(newStatus.description)")
+
+            switch newStatus {
+            case ScrcpyStatusSDLWindowAppeared:
+                print("✅ [MainContentView] SDL Window appeared")
+                userDismissedConnection = false // 重置用户关闭标志
+                LatencyBadgeWindow.shared.show()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    currentStatusMessage = nil
+                }
+
+            case ScrcpyStatusConnected:
+                print("✅ [MainContentView] Connection successful")
+                // 连接成功就把「走哪条路 + 延迟」的气泡浮上去。
+                // ★ 别只等 SDLWindowAppeared(7) —— 那个状态**只有 VNC 那条路会发**
+                //   （见 ScrcpyVNCRuntime.m），scrcpy/ADB 模式压根不发，
+                //   挂在那儿的话气泡永远不出现。
+                LatencyBadgeWindow.shared.show()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    currentStatusMessage = nil
+                }
+
+            case ScrcpyStatusConnectingFailed:
+                print("❌ [MainContentView] Connection failed, waiting for user to dismiss")
+                LatencyBadgeWindow.shared.hide()
+
+            case ScrcpyStatusDisconnected:
+                print("🔌 [MainContentView] Connection disconnected, cleaning up")
+                userDismissedConnection = false // 重置用户关闭标志
+                currentStatusMessage = nil
+                // 回到主页 = 这次连接结束：收掉浮层并**禁止它再冒出来**。
+                // 网络后面再怎么变，也不该有一条「正在重连」浮在主页上
+                // （用户要求：回主页就不能自动重连了，只能手动去连）。
+                LatencyBadgeWindow.shared.suppressAndHide()
+
+            default:
+                break
+            }
+        }
+        // Migration prompt
+        .alert("Legacy Data Found", isPresented: $showMigrationAlert) {
+            Button("Migrate") {
+                performMigration()
+            }
+            Button("Skip", role: .cancel) {
+                declineMigration()
+            }
+        } message: {
+            if let deviceInfo = legacyDeviceInfo {
+                Text("We found device settings from the previous versions:\n\n📱 Device: \(deviceInfo.host):\(deviceInfo.port)\n\nWould you like to migrate this device to the new app? A new ADB device will be created with your previous settings.")
+            } else {
+                Text("We found settings from the previous versions. Would you like to migrate them to the new version?")
+            }
         }
     }
 }

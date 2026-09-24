@@ -1186,6 +1186,18 @@ struct ActionsView: View {
             }
         }
         .navigationTitle("Scrcpy Actions")
+        // ★ 以前这个「+」挂在外层 MainContentView 的 toolbar 上（`isNewActionPresented`）。
+        //   现在 Actions 从 Tab 降级成 Console 里推出来的一页，外层 toolbar 没了，
+        //   所以在这里自带一个 —— 顺带把本来就声明了却没人用的 `showingNewAction` 用起来。
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showingNewAction = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+            }
+        }
         .sheet(isPresented: $showingNewAction) {
             NewActionView { action in
                 actionManager.saveAction(action)
