@@ -16,6 +16,17 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// 分享面板 和「新建文件夹」共用**一个** sheet 位。
+///
+/// ★ 同一个视图上挂两个 `.sheet` 时，SwiftUI 只认第一个，第二个静默失效 ——
+///   日志里只留一句 `Currently, only presenting a single sheet is supported.`。
+///   合并前的症状就是「点新建文件夹没反应」。同 MainContentView 的 `SessionSheet`。
+private enum FilesSheet: Identifiable {
+    case share
+    case newFolder
+    var id: String { String(describing: self) }
+}
+
 struct FilesView: View {
 
     /// 默认落地目录。用真实路径，别用 `/sdcard`（符号链接，见文件头注释）。
@@ -48,9 +59,10 @@ struct FilesView: View {
 
     @State private var isImporting = false
     @State private var shareItems: [Any] = []
-    @State private var isSharing = false
 
-    @State private var showNewFolderSheet = false
+    /// 见文件头的 `FilesSheet` —— 原本是 `isSharing` + `showNewFolderSheet` 两个 bool，
+    /// 挂两个 `.sheet` 会让后者永远不显示。
+    @State private var activeSheet: FilesSheet? = nil
     @State private var newFolderName = ""
 
     @State private var pendingDelete: FileEntry?
@@ -89,11 +101,12 @@ struct FilesView: View {
                 errorText = "Pick file failed: \(error.localizedDescription)"
             }
         }
-        .sheet(isPresented: $isSharing) {
-            ShareSheet(items: shareItems)
-        }
-        .sheet(isPresented: $showNewFolderSheet) {
-            newFolderSheet
+        // ★ 只留一个 `.sheet` —— 挂两个会让第二个永远不显示（见文件头 FilesSheet）
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .share:     ShareSheet(items: shareItems)
+            case .newFolder: newFolderSheet
+            }
         }
         .alert(isPresented: $showDeleteConfirm) {
             Alert(
@@ -132,7 +145,7 @@ struct FilesView: View {
 
             Button {
                 newFolderName = ""
-                showNewFolderSheet = true
+                activeSheet = .newFolder
             } label: {
                 Image(systemName: "folder.badge.plus")
                     .foregroundColor(Theme.accent)
@@ -261,9 +274,9 @@ struct FilesView: View {
             }
             .navigationBarTitle("New folder", displayMode: .inline)
             .navigationBarItems(
-                leading: Button("Cancel") { showNewFolderSheet = false },
+                leading: Button("Cancel") { activeSheet = nil },
                 trailing: Button("Create") {
-                    showNewFolderSheet = false
+                    activeSheet = nil
                     createFolder(newFolderName)
                 }
                 .disabled(newFolderName.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -358,7 +371,7 @@ struct FilesView: View {
                 if result.ok && FileManager.default.fileExists(atPath: destination.path) {
                     banner = "Saved \(entry.name) — opening share sheet."
                     shareItems = [destination]
-                    isSharing = true
+                    activeSheet = .share
                 } else {
                     errorText = result.trimmed.isEmpty ? "Pull failed." : result.trimmed
                 }

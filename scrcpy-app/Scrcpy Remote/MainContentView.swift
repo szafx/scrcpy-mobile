@@ -7,12 +7,32 @@
 
 import SwiftUI
 
+/// 「新建会话」和「编辑会话」合成**一个** sheet。
+///
+/// ★ 为什么必须合并 —— 2026-09-24 实测踩到的坑：
+///   在同一个视图上挂两个 `.sheet` 时，SwiftUI **只认第一个**，第二个被静默排队，
+///   日志里只留一句
+///       `Currently, only presenting a single sheet is supported.`
+///       `The next sheet will be presented when the currently presented sheet gets dismissed.`
+///   现象是「长按设备 → 点 Edit 没有任何反应」—— 回调其实跑了（`Editing session:` 有打印），
+///   是 sheet 压根没被呈现。用 `isPresented` + `item` 各挂一个同样中招。
+enum SessionSheet: Identifiable {
+    case create
+    case edit(ScrcpySession)
+
+    var id: String {
+        switch self {
+        case .create:            return "create"
+        case .edit(let session): return "edit-\(session.id.uuidString)"
+        }
+    }
+}
+
 struct MainContentView: View {
     @StateObject private var connectionManager = SessionConnectionManager.shared
-    
+
     @State private var selectedTab = 0
-    @State private var isSessionCreatePresented = false
-    @State private var editingSession: ScrcpySession? = nil
+    @State private var sessionSheet: SessionSheet? = nil
     @State private var savedSessions: [ScrcpySession] = []
     @State private var currentStatusMessage: String?
     @State private var userDismissedConnection: Bool = false
@@ -165,7 +185,7 @@ struct MainContentView: View {
             },
             onEditSession: { session in
                 print("Editing session:", session.title)
-                editingSession = session
+                sessionSheet = .edit(session)
             },
             onDuplicateSession: { session in
                 print("Duplicating session:", session.title)
@@ -173,22 +193,22 @@ struct MainContentView: View {
                 reloadSessions()
             },
             onCreateSession: {
-                isSessionCreatePresented = true
+                sessionSheet = .create
             }
         )
-        .sheet(isPresented: $isSessionCreatePresented, onDismiss: {
-            editingSession = nil
+        // ★ 新建 / 编辑**共用这一个** sheet。见 `SessionSheet` 上面那段说明 ——
+        //   挂两个会静默失效（点 Edit 没反应）。
+        .sheet(item: $sessionSheet, onDismiss: {
             reloadSessions()
-        }) {
-            SessionCreateView()
-                .environmentObject(appSettings)
-        }
-        .sheet(item: $editingSession, onDismiss: {
-            editingSession = nil
-            reloadSessions()
-        }) { item in
-            SessionCreateView(sessionModel: item.sessionModel)
-                .environmentObject(appSettings)
+        }) { sheet in
+            switch sheet {
+            case .create:
+                SessionCreateView()
+                    .environmentObject(appSettings)
+            case .edit(let session):
+                SessionCreateView(sessionModel: session.sessionModel)
+                    .environmentObject(appSettings)
+            }
         }
         .overlay {
             if shouldShowConnectionStatusView {
