@@ -66,22 +66,6 @@ jobs:
             printf '%-22s ' "$t"; command -v "$t" || echo '(缺)'
           done
 
-      # ★ 只有「编译 host 版 protobuf」那一步需要子模块的 tag（adb-mobile 的
-      #   make-protobuf.sh 里 `git checkout v$protoc_version` + abseil `git checkout 20240722.0`），
-      #   而那一步本身就带 cache 条件，并且它自己在 checkout 前又跑了一遍
-      #   `git fetch --tags --force` —— 所以 cache 命中时这步纯属白等。
-      #
-      #   实测：cache 命中时它要 198 秒（全流程最贵的一步，仅次于 xcodebuild）。
-      #   条件写成和 protobuf 那步**一模一样**，两者永远同开同关，
-      #   不可能出现「protobuf 编了但 tag 没拉」的组合。
-      #
-      #   cache 命中时唯一还会跑的编译步骤是 `make -C porting scrcpy` ——
-      #   make-scrcpy.sh 里没有任何 git 命令（纯 cmake），scrcpy 自己的 meson.build
-      #   版本号也是硬编码的 '4.1'，不是 git describe。所以不需要 tag。
-      - name: 拉子模块的 tag（脚本里要按 tag 检出）
-        if: steps.libcache.outputs.cache-hit != 'true'
-        run: git submodule foreach --recursive 'git fetch --tags --force --prune || true'
-
       - name: 缓存 porting 产物
         id: libcache
         uses: actions/cache@v4
@@ -90,6 +74,27 @@ jobs:
             porting/libs
             scrcpy/x
           key: porting-libs-v3-${{ hashFiles('porting/Makefile', 'porting/scripts/**', 'porting/cmake/**', '.gitmodules') }}
+
+      # ★ 只有「编译 host 版 protobuf」那一步需要子模块的 tag（adb-mobile 的
+      #   make-protobuf.sh 里 `git checkout v$protoc_version` + abseil `git checkout 20240722.0`），
+      #   而那一步本身就带 cache 条件，并且它自己在 checkout 前又跑了一遍
+      #   `git fetch --tags --force` —— 所以 cache 命中时这步纯属白等。
+      #
+      #   实测：cache 命中时它要 198~229 秒（全流程最贵的一步，仅次于 xcodebuild）。
+      #   条件写成和 protobuf 那步**一模一样**，两者永远同开同关，
+      #   不可能出现「protobuf 编了但 tag 没拉」的组合。
+      #
+      #   cache 命中时唯一还会跑的编译步骤是 `make -C porting scrcpy` ——
+      #   make-scrcpy.sh 里没有任何 git 命令（纯 cmake），scrcpy 自己的 meson.build
+      #   版本号也是硬编码的 '4.1'，不是 git describe。所以不需要 tag。
+      #
+      # ★★ 顺序是这步的要害：**必须排在「缓存 porting 产物」后面**。
+      #    它的 if 引用 steps.libcache.outputs.cache-hit，而 GitHub Actions 对
+      #    「前面还不存在的 step 输出」求值成空串 → `'' != 'true'` 恒为真 →
+      #    加了 if 照样跑。实测踩过：第一次把 if 加上去，那步还是跑了 229 秒。
+      - name: 拉子模块的 tag（脚本里要按 tag 检出）
+        if: steps.libcache.outputs.cache-hit != 'true'
+        run: git submodule foreach --recursive 'git fetch --tags --force --prune || true'
 
       # ★★ 这步是之前真正卡住的原因：
       #   上游 porting/Makefile 的 mkdir-output 只建了 libs，没建子目录，
