@@ -221,6 +221,44 @@ jobs:
             CODE_SIGN_IDENTITY= \
             build
 
+      # ★★ 防「本地化被静默截断」。
+      #   .strings 里只要有一行非法，Xcode 的 builtin-copyStrings 就会**提前停止解析**，
+      #   而且**不报错** —— 后面的词条一条也进不了 bundle。
+      #   2026-09-24 实测踩到：zh-Hans 里混进了一段 UTF-8 字节，导致第 433 行之后的
+      #   词条（含新加的 96 条）全部丢失，而构建一直是绿的、看不出来。
+      #   这里把「源文件有多少 key」和「bundle 里实际有多少」对一下，对不上就红。
+      - name: 校验本地化没被静默截断
+        working-directory: scrcpy-app
+        run: |
+          python3 - <<'PYEOF'
+          import plistlib, re, sys, pathlib
+
+          src = pathlib.Path("Scrcpy Remote")
+          apps = list(pathlib.Path("build/DerivedData/Build/Products").glob("**/Release-iphoneos/*.app"))
+          assert apps, "找不到编译出来的 .app"
+          app = apps[0]
+          print("app:", app)
+
+          bad = False
+          for lang in ("zh-Hans", "en", "ja", "ko"):
+              raw = src / f"{lang}.lproj" / "Localizable.strings"
+              if not raw.exists():
+                  print(f"SKIP {lang}: 源文件不存在")
+                  continue
+              text = raw.read_bytes().decode("utf-16")
+              want = len(set(re.findall(r'"((?:[^"\\]|\\.)+)"\s*=', text)))
+              builtin = plistlib.loads((app / f"{lang}.lproj" / "Localizable.strings").read_bytes())
+              got = len(builtin)
+              print(f"{'OK  ' if got >= want else 'FAIL'} {lang}: 源 {want} 条 / bundle {got} 条")
+              if got < want:
+                  bad = True
+
+          if bad:
+              print("::error::本地化被截断 —— .strings 里有非法行会让 builtin-copyStrings 提前停止解析，且不报错")
+              sys.exit(1)
+          print("✅ 四种语言的词条数都对得上")
+          PYEOF
+
       - name: 打包成 IPA
         run: |
           set -x
