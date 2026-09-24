@@ -125,7 +125,7 @@ struct DeviceInfoView: View {
     // MARK: - 版式
 
     @ViewBuilder
-    private func section<Content: View>(_ title: String, @ViewBuilder content: @escaping () -> Content) -> some View {
+    private func section<Content: View>(_ title: LocalizedStringKey, @ViewBuilder content: @escaping () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
@@ -139,14 +139,16 @@ struct DeviceInfoView: View {
     }
 
     @ViewBuilder
-    private func row(_ label: String, _ value: String?, valueColor: Color? = nil) -> some View {
+    private func row(_ label: LocalizedStringKey, _ value: String?, valueColor: Color? = nil) -> some View {
         if let value = value, !value.isEmpty {
             HStack(alignment: .top) {
                 Text(label)
                     .font(.system(size: 14))
                     .foregroundColor(Theme.secondaryText)
                 Spacer(minLength: 12)
-                Text(value)
+                // 值多半是动态的（电量、温度、容量），查不到表就回落成原文；
+                // 但 Status/Health 那种固定词（Charging / Full / Good）就能翻出来。
+                Text(LocalizedStringKey(value))
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(valueColor ?? .primary)
                     .multilineTextAlignment(.trailing)
@@ -316,7 +318,7 @@ struct DeviceInfoView: View {
 
 struct StorageRow: Identifiable {
     let id = UUID()
-    let label: String
+    let label: LocalizedStringKey
     let value: String
 }
 
@@ -340,9 +342,10 @@ struct BatteryInfo {
         guard let level = level else { return "—" }
         guard let status = status else { return "\(level)%" }
         switch status {
-        case 2: return "\(level)%  ⚡ charging"
-        case 4: return "\(level)%  (not charging)"
-        case 5: return "\(level)%  (full)"
+        // 这几个词是拼进字符串的，查表查不到整串，只能就地翻
+        case 2: return "\(level)%  ⚡ " + NSLocalizedString("charging", comment: "")
+        case 4: return "\(level)%  (" + NSLocalizedString("not charging", comment: "") + ")"
+        case 5: return "\(level)%  (" + NSLocalizedString("full", comment: "") + ")"
         default: return "\(level)%"
         }
     }

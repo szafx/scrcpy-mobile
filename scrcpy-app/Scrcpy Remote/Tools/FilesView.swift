@@ -185,7 +185,8 @@ struct FilesView: View {
     private func messageBanner(_ text: String, color: Color) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "info.circle.fill")
-            Text(text)
+            // 提示文案是动态赋值的（"Deleted" / "Created" …），包成 key 才能翻
+            Text(LocalizedStringKey(text))
                 .font(.system(size: 13))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)

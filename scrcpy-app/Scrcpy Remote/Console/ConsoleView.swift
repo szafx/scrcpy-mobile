@@ -320,8 +320,9 @@ struct ConsoleView: View {
 
 struct ConsoleTool: Identifiable {
     let index: Int
-    let title: String
-    let subtitle: String
+    // 文字用 key，才会查 Localizable.strings（见 Components.swift 的说明）
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey
     let icon: String
 
     enum Kind {
@@ -395,8 +396,8 @@ private struct ToolCell: View {
 
 /// 还没实现的工具页。写着进度，别让用户以为是坏了。
 struct ComingSoonView: View {
-    let title: String
-    let note: String
+    let title: LocalizedStringKey
+    let note: LocalizedStringKey
 
     var body: some View {
         VStack {

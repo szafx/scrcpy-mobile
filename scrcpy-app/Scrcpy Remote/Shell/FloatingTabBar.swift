@@ -13,7 +13,7 @@ import SwiftUI
 struct ShellTab: Identifiable, Equatable {
     let id: Int
     let icon: String
-    let title: String
+    let title: LocalizedStringKey
 }
 
 struct FloatingTabBar: View {
@@ -62,6 +62,6 @@ struct FloatingTabBar: View {
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(tab.title)
+        .accessibilityLabel(Text(tab.title))
     }
 }

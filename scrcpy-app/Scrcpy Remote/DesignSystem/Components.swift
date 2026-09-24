@@ -55,8 +55,10 @@ struct CardContainer<Content: View>: View {
 /// Devices 页顶部那张蓝→紫渐变实心卡：左侧圆形图标 + 主标题 + 两行小字。
 struct HeroCard: View {
     let icon: String
-    let title: String
-    let subtitle: String
+    // ★ 文字用 LocalizedStringKey：`Text(String变量)` 走 StringProtocol 重载、不查表，
+    //   永远显示英文。写成 key 才会去 Localizable.strings 里找。
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -101,7 +103,7 @@ enum StatusPillKind {
 
 /// `Connected` 绿底浅绿字 / `Idle` 灰底。
 struct StatusPill: View {
-    let text: String
+    let text: LocalizedStringKey
     var kind: StatusPillKind = .idle
     /// 前面那个小圆点（VRLink 的 Connected 药丸里有一个）。
     var showDot: Bool = true
@@ -147,7 +149,7 @@ struct StatusPill: View {
 
 /// 小胶囊：选中 = 蓝底白字，未选 = 白底灰字。
 struct FilterChip: View {
-    let title: String
+    let title: LocalizedStringKey
     let isSelected: Bool
     let action: () -> Void
 
@@ -217,8 +219,8 @@ struct ToolIcon: View {
 /// 居中圆角方块浅色图标 + 粗体标题 + 灰色说明 + 可选主按钮。
 struct EmptyStateView<Action: View>: View {
     let icon: String
-    let title: String
-    let message: String
+    let title: LocalizedStringKey
+    let message: LocalizedStringKey
     @ViewBuilder var action: () -> Action
 
     var body: some View {
@@ -251,7 +253,7 @@ struct EmptyStateView<Action: View>: View {
 }
 
 extension EmptyStateView where Action == EmptyView {
-    init(icon: String, title: String, message: String) {
+    init(icon: String, title: LocalizedStringKey, message: LocalizedStringKey) {
         self.init(icon: icon, title: title, message: message) { EmptyView() }
     }
 }
@@ -260,7 +262,7 @@ extension EmptyStateView where Action == EmptyView {
 
 /// 全宽蓝色主按钮（空状态里的 `Scan LAN`）。
 struct PrimaryButton: View {
-    let title: String
+    let title: LocalizedStringKey
     var icon: String? = nil
     let action: () -> Void
 
@@ -294,7 +296,7 @@ struct PrimaryButton: View {
 /// `NavigationLink` 推页面，另外两个要触发 action。
 struct QuickEntryLabel: View {
     let icon: String
-    let title: String
+    let title: LocalizedStringKey
 
     var body: some View {
         VStack(spacing: 8) {
@@ -311,7 +313,7 @@ struct QuickEntryLabel: View {
 
 struct QuickEntryButton: View {
     let icon: String
-    let title: String
+    let title: LocalizedStringKey
     let action: () -> Void
 
     var body: some View {
