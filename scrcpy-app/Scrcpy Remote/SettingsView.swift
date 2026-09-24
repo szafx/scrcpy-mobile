@@ -1686,7 +1686,7 @@ struct LogFileDetailView: View {
             }
         )
         .sheet(isPresented: $showingShareSheet) {
-            ShareSheet(activityItems: [URL(fileURLWithPath: logFile.filePath)])
+            ShareSheet(items: [URL(fileURLWithPath: logFile.filePath)])
         }
         .onAppear {
             loadLogContent()
@@ -2473,16 +2473,9 @@ struct SafariView: UIViewControllerRepresentable {
 }
 
 // MARK: - ShareSheet
-struct ShareSheet: UIViewControllerRepresentable {
-    var activityItems: [Any]
-    var applicationActivities: [UIActivity]? = nil
-    
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
-        return controller
-    }
-    
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
-        // Nothing to do here
-    }
-}
+//
+// ⚠️ 这里原来有一个 `struct ShareSheet { var activityItems: [Any] }`，已删除。
+//    新版在 DesignSystem/Components.swift 里（参数名是 `items:`，取自 VRLink 那套控件）。
+//    两个同名 struct 并存 → `error: invalid redeclaration of 'ShareSheet'`，
+//    而且调用点会挑到 Components.swift 那个，报 `incorrect argument label`。
+//    以后再加同类控件，先 grep 一遍同名定义。

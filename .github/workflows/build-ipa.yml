@@ -66,7 +66,20 @@ jobs:
             printf '%-22s ' "$t"; command -v "$t" || echo '(缺)'
           done
 
+      # ★ 只有「编译 host 版 protobuf」那一步需要子模块的 tag（adb-mobile 的
+      #   make-protobuf.sh 里 `git checkout v$protoc_version` + abseil `git checkout 20240722.0`），
+      #   而那一步本身就带 cache 条件，并且它自己在 checkout 前又跑了一遍
+      #   `git fetch --tags --force` —— 所以 cache 命中时这步纯属白等。
+      #
+      #   实测：cache 命中时它要 198 秒（全流程最贵的一步，仅次于 xcodebuild）。
+      #   条件写成和 protobuf 那步**一模一样**，两者永远同开同关，
+      #   不可能出现「protobuf 编了但 tag 没拉」的组合。
+      #
+      #   cache 命中时唯一还会跑的编译步骤是 `make -C porting scrcpy` ——
+      #   make-scrcpy.sh 里没有任何 git 命令（纯 cmake），scrcpy 自己的 meson.build
+      #   版本号也是硬编码的 '4.1'，不是 git describe。所以不需要 tag。
       - name: 拉子模块的 tag（脚本里要按 tag 检出）
+        if: steps.libcache.outputs.cache-hit != 'true'
         run: git submodule foreach --recursive 'git fetch --tags --force --prune || true'
 
       - name: 缓存 porting 产物
