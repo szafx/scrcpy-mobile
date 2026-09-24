@@ -129,7 +129,7 @@ struct AppsView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(Filter.allCases, id: \.self) { item in
-                        FilterChip(title: item.rawValue, isSelected: filter == item) {
+                        FilterChip(title: LocalizedStringKey(item.rawValue), isSelected: filter == item) {
                             filter = item
                         }
                     }
@@ -180,7 +180,7 @@ struct AppsView: View {
             EmptyStateView(
                 icon: "square.grid.2x2",
                 title: "No packages",
-                message: errorText ?? "Pull to refresh or tap ↻ to retry."
+                message: LocalizedStringKey(errorText ?? "Pull to refresh or tap ↻ to retry.")
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {

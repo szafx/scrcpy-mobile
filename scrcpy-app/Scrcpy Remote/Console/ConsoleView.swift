@@ -181,7 +181,7 @@ struct ConsoleView: View {
                     }
 
                     StatusPill(
-                        text: statusText,
+                        text: LocalizedStringKey(statusText),
                         kind: statusKind
                     )
                     .padding(.top, 1)

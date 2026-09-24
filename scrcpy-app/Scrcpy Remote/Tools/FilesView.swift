@@ -174,7 +174,7 @@ struct FilesView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(Self.shortcuts) { item in
-                    FilterChip(title: item.label, isSelected: currentPath == item.path) {
+                    FilterChip(title: LocalizedStringKey(item.label), isSelected: currentPath == item.path) {
                         currentPath = item.path
                         load()
                     }
@@ -229,7 +229,7 @@ struct FilesView: View {
             EmptyStateView(
                 icon: "folder",
                 title: "Empty",
-                message: errorText ?? "This folder has nothing in it."
+                message: LocalizedStringKey(errorText ?? "This folder has nothing in it.")
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {

@@ -222,7 +222,7 @@ private struct DeviceRow: View {
                     .foregroundColor(Theme.secondaryText)
                     .lineLimit(1)
 
-                StatusPill(text: status, kind: kind)
+                StatusPill(text: LocalizedStringKey(status), kind: kind)
                     .padding(.top, 1)
             }
 
