@@ -297,6 +297,22 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         justHadNetworkChange = true
         justHadNetworkChangeAt = Date()
 
+        // ★★ 蜂窝 → WiFi 这个方向，光靠"探测连接还通不通"是判不出来的。
+        //
+        //   因为旧连接**技术上确实还活着**（还在走蜂窝），但系统首选路径已经切到 WiFi，
+        //   画面就卡死了 —— 探测却报"还通"，于是永远不重建。
+        //   真机实测就是这个方向卡屏 + 最终回主页，而反方向（WiFi→蜂窝）是好的。
+        //
+        //   所以要专门认「WiFi 从无到有」这个事件：一旦 WiFi 出现并稳定下来，
+        //   就主动重建连接（重连时会重新判定，走局域网，更快）。
+        let names = Set(path.availableInterfaces.map { $0.name })
+        let wifiAppeared = names.contains("en0") && !lastInterfaceNames.contains("en0")
+        lastInterfaceNames = names
+
+        if wifiAppeared {
+            scheduleWifiAppearConfirm()
+        }
+
         // ★★ 别干等着底层 TCP 超时。
         //
         //   切网之后底层连接**不会立刻断** —— 它在等 TCP 重传超时，可能几十秒。
@@ -311,6 +327,39 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
 
     /// 网络刚变过之后的「主动拆连接」定时器
     private var proactiveTeardown: DispatchWorkItem?
+
+    /// WiFi 从无到有之后，隔几秒确认它还在；还在就主动重建连接。
+    ///
+    /// ★ 为什么专门为这个方向写一段：蜂窝→WiFi 时，旧连接**技术上还活着**
+    ///   （还在走蜂窝），所以"探测还通不通"这条路判不出该重建 ——
+    ///   但系统首选已经切到 WiFi，画面会卡死。
+    ///   真机实测：WiFi→蜂窝方向正常，蜂窝→WiFi 方向卡屏 + 最终回主页。
+    ///
+    ///   而弱信号 WiFi 会在有/无之间横跳（日志里连着十几条路径变化），
+    ///   所以出现之后要先确认它稳定，再动手。
+    private func scheduleWifiAppearConfirm() {
+        wifiAppearConfirm?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+
+            // 隔了几秒，WiFi 还在吗？
+            guard self.lastInterfaceNames.contains("en0") else {
+                print("[AutoReconnect] WiFi 出现后又没了（信号飘）—— 不重建")
+                return
+            }
+
+            let stable = self.connectionStatus == ScrcpyStatusConnected
+                      || self.connectionStatus == ScrcpyStatusSDLWindowAppeared
+            guard stable, !self.isAutoReconnecting, !self.isConnecting,
+                  let session = self.currentSession else { return }
+
+            print("[AutoReconnect] WiFi 稳定出现 —— 重建连接改走局域网")
+            self.performAutoReconnect(session)
+        }
+        wifiAppearConfirm = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + wifiAppearConfirmDelay, execute: work)
+    }
 
     private func scheduleProactiveTeardown() {
         proactiveTeardown?.cancel()
@@ -365,6 +414,15 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     /// 网络刚刚变化过（断开处理器据此决定要不要自动重连）。
     private var justHadNetworkChange = false
     private var justHadNetworkChangeAt: Date?
+
+    /// 上一次看到的接口集合（用来识别「WiFi 从无到有」这个事件）
+    private var lastInterfaceNames: Set<String> = []
+
+    /// WiFi 首次出现后，等它稳定多久才算"真的有了"（秒）。
+    /// 弱信号 WiFi 会在有/无之间横跳，不加这个延迟会反复重建连接。
+    private let wifiAppearConfirmDelay: TimeInterval = 3.0
+    /// 「WiFi 稳定出现」的确认定时器
+    private var wifiAppearConfirm: DispatchWorkItem?
     /// 网络变化的有效期 —— 太久之前的切换不该用来解释现在的断开。
     private let networkChangeWindow: TimeInterval = 15
 
