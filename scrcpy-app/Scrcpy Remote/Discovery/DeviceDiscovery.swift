@@ -3,13 +3,19 @@
 //  Scrcpy Remote
 //
 //  「发现设备」的统一数据源（Devices 页的扫描面板用）：
-//    · 局域网组：扫网段 → 逐台 adb 认序列号/型号 → 认完立即断开
+//    · 局域网组：扫网段 → 批量识别（型号 + 序列号后4位）→ 认完立即断开
 //    · frpc 在线组：拉 frps 管理接口（webServer）的在线 proxy 名单
 //    · 合并：同一台（型号 + 序列号后4位相同）两边都出现时合成一行，
 //      连接时由既有的三级连接逻辑自动「局域网 → frpc(P2P) → 中转」选路。
 //
-//  ★ 认设备读的是 ro.serialno / ro.product.model，和被控端部署脚本
+//  ★ 识别读的是 ro.serialno / ro.product.model，和被控端部署脚本
 //    （deploy-frpc.py 的 phone-<型号>-<序列号后4位>）同源，所以两边能对上。
+//
+//  ★ 速度设计（2026-10-07 用户反馈"局域网好慢"后重做）：
+//    ① 身份结果**持久缓存**（host → 型号+后缀）—— 识别过的设备下次秒出
+//    ② 未识别的设备：**并行发起 adb connect**（握手最慢，并发摊掉），
+//       等状态沉淀（offline/authorizing → device）后**串行读身份**（此时很快）
+//    ③ 型号和序列号一次 shell 全拿（`getprop A; getprop B`），省一半往返
 //
 
 import Foundation
@@ -34,7 +40,7 @@ final class DeviceDiscovery: ObservableObject {
     @Published var frpError: String? = nil
     @Published private(set) var running = false
 
-    /// 跑一轮完整发现：先 frpc 名单（快），再局域网扫描 + 逐台识别（慢，逐台出现）。
+    /// 跑一轮完整发现：先 frpc 名单（快），再局域网扫描 + 批量识别（逐台出现）。
     func run() async {
         running = true
         devices = []
@@ -47,21 +53,36 @@ final class DeviceDiscovery: ObservableObject {
 
         phase = "Scanning LAN…"
         let candidates = await LanDiscovery.discover()
-        if candidates.isEmpty {
-            phase = devices.isEmpty ? "No devices found" : "Done"
-            running = false
-            return
+
+        // ① 命中过的设备先用缓存**立即上屏**（识别结果几乎不变：序列号不会变）
+        let cache = Self.loadIdentityCache()
+        var needIdentify: [String] = []
+        for candidate in candidates {
+            if let cached = cache[candidate.host] {
+                merge([DiscoveredDevice(id: "\(cached.0)-\(cached.1)",
+                                        model: cached.0,
+                                        suffix: cached.1,
+                                        lanHost: candidate.host,
+                                        frpProxyName: nil)])
+            } else {
+                needIdentify.append(candidate.host)
+            }
         }
 
-        for candidate in candidates {
+        // ② 没缓存过的批量识别（并行握手 + 串行读身份）
+        if !needIdentify.isEmpty {
             phase = "Identifying devices…"
-            if let info = await Self.identify(host: candidate.host) {
+            let identified = await Self.identifyMany(hosts: needIdentify)
+            var newCache = cache
+            for (host, info) in identified {
+                newCache[host] = (info.model, info.suffix)
                 merge([DiscoveredDevice(id: "\(info.model)-\(info.suffix)",
                                         model: info.model,
                                         suffix: info.suffix,
-                                        lanHost: candidate.host,
+                                        lanHost: host,
                                         frpProxyName: nil)])
             }
+            Self.saveIdentityCache(newCache)
         }
 
         phase = devices.isEmpty ? "No devices found" : "Done"
@@ -81,39 +102,103 @@ final class DeviceDiscovery: ObservableObject {
         }
     }
 
-    // MARK: - 局域网识别
+    // MARK: - 身份缓存（host -> 型号、序列号后4位）
 
-    /// adb 连上去读型号 + 序列号后4位，读完**立即断开**（不污染设备表）。
-    private static func identify(host: String) async -> (model: String, suffix: String)? {
+    private static let identityCacheKey = "settings.discovery.lan_identity_cache"
+
+    private static func loadIdentityCache() -> [String: (String, String)] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: identityCacheKey) as? [String: [String]] else {
+            return [:]
+        }
+        var out: [String: (String, String)] = [:]
+        for (host, pair) in raw where pair.count == 2 {
+            out[host] = (pair[0], pair[1])
+        }
+        return out
+    }
+
+    private static func saveIdentityCache(_ cache: [String: (String, String)]) {
+        var raw: [String: [String]] = [:]
+        for (host, pair) in cache {
+            raw[host] = [pair.0, pair.1]
+        }
+        UserDefaults.standard.set(raw, forKey: identityCacheKey)
+    }
+
+    // MARK: - 批量识别
+
+    /// 对一批 host 做识别：并行 connect → 等状态沉淀 → 串行读身份 → 全部断开。
+    /// 返回 host -> (model, suffix)。
+    private static func identifyMany(hosts: [String]) async -> [String: (model: String, suffix: String)] {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                let target = "\(host):5555"
                 let client = ADBClient.shared()
-                _ = client.executeADBCommand(["connect", target], returnCode: nil)
+                func target(_ host: String) -> String { "\(host):5555" }
 
-                var rc: Int32 = 0
-                let serial = client.executeADBCommand(
-                    ["-s", target, "shell", "getprop", "ro.serialno"],
-                    returnCode: &rc
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-                let model = client.executeADBCommand(
-                    ["-s", target, "shell", "getprop", "ro.product.model"],
-                    returnCode: nil
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-
-                // 认完人就撤 —— 这是设备表保洁的第一道防线（2000 字注释见
-                // SessionNetworking.readSerialNumber：留着会炸 push）
-                _ = client.executeADBCommand(["disconnect", target], returnCode: nil)
-
-                if rc == 0, !serial.isEmpty, !model.isEmpty, serial.count >= 4 {
-                    let suffix = String(serial.suffix(4))
-                    print("[DeviceDiscovery] \(host) -> \(model)-\(suffix)")
-                    continuation.resume(returning: (model, suffix))
-                } else {
-                    continuation.resume(returning: nil)
+                // ① 并行发起 connect —— 每次握手动辄一两秒，串行是慢的主因
+                let group = DispatchGroup()
+                for host in hosts {
+                    group.enter()
+                    DispatchQueue.global(qos: .utility).async {
+                        _ = client.executeADBCommand(["connect", target(host)], returnCode: nil)
+                        group.leave()
+                    }
                 }
+                _ = group.wait(timeout: .now() + 12)
+
+                // ② 等状态沉淀：offline/authorizing 的等它变 device（最多 8 秒）
+                let deadline = Date().addingTimeInterval(8)
+                while Date() < deadline {
+                    let states = parseDeviceStates(client.executeADBCommand(["devices"], returnCode: nil))
+                    let pending = hosts.contains { host in
+                        let state = states[target(host)]
+                        return state == nil || state == "offline"
+                            || state == "connecting" || state == "authorizing"
+                    }
+                    if !pending { break }
+                    Thread.sleep(forTimeInterval: 0.3)
+                }
+
+                // ③ 串行读身份（transport 已就绪，快）；型号+序列号一次拿
+                var result: [String: (model: String, suffix: String)] = [:]
+                for host in hosts {
+                    let t = target(host)
+                    var rc: Int32 = 0
+                    let output = client.executeADBCommand(
+                        ["-s", t, "shell", "getprop ro.serialno; getprop ro.product.model"],
+                        returnCode: &rc
+                    )
+                    let lines = output.split(separator: "\n")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                    if rc == 0, lines.count >= 2 {
+                        let serial = lines[0]
+                        let model = lines[1]
+                        if serial.count >= 4, !model.isEmpty {
+                            result[host] = (model, String(serial.suffix(4)))
+                            print("[DeviceDiscovery] \(host) -> \(model)-\(serial.suffix(4))")
+                        }
+                    }
+                    // 认完人就撤 —— 设备表保洁第一道防线（别留临时连接炸 push）
+                    _ = client.executeADBCommand(["disconnect", t], returnCode: nil)
+                }
+
+                continuation.resume(returning: result)
             }
         }
+    }
+
+    /// 解析 `adb devices` 输出：addr -> state
+    private static func parseDeviceStates(_ output: String) -> [String: String] {
+        var states: [String: String] = [:]
+        for rawLine in output.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("List of devices") { continue }
+            let parts = line.split(separator: "\t").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count >= 2 else { continue }
+            states[parts[0]] = parts[1]
+        }
+        return states
     }
 
     // MARK: - frps 在线名单
