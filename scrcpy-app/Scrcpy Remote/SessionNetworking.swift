@@ -567,6 +567,26 @@ class SessionNetworking {
         Task { _ = await discoverLan(port: port) }
     }
 
+    /// 供「发现设备」面板使用的共享扫描。
+    ///
+    /// ★ 为什么必须有它（2026-10-07 实测的卡顿来源）：面板如果直接调
+    ///   `LanDiscovery.discover()`，会和 App 启动时的预热扫描**并发跑两份**
+    ///   253 地址扫描，互相拖慢、还把 adb 通道搅得直抖。
+    ///   这里统一走「最近缓存 → 正在跑的任务 → 真扫一遍」三级，和预热互斥。
+    ///
+    /// - Parameter maxCacheAge: 缓存多久内算「新鲜」（面板场景 60 秒足够）
+    func sharedLanCandidates(maxCacheAge: TimeInterval = 60) async -> [LanDiscovery.Candidate] {
+        if let at = lanScanAt, Date().timeIntervalSince(at) < maxCacheAge, !lanScanCache.isEmpty {
+            print("[LanDiscovery] 复用最近 \(Int(Date().timeIntervalSince(at))) 秒内的扫描结果（\(lanScanCache.count) 台）")
+            return lanScanCache
+        }
+        if let running = lanScanTask {
+            print("[LanDiscovery] 复用正在跑的扫描任务")
+            return await running.value
+        }
+        return await discoverLan(port: 5555)
+    }
+
     /// 返回局域网里属于**这台设备**的地址；不在局域网（或认不出来）就返回 nil。
     ///
     /// 匹配顺序（快的在前，慢的兜底）：

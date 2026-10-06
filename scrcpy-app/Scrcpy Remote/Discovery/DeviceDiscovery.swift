@@ -52,7 +52,9 @@ final class DeviceDiscovery: ObservableObject {
         merge(frpDevices)
 
         phase = "Scanning LAN…"
-        let candidates = await LanDiscovery.discover()
+        // ★ 走共享扫描（复用预热任务/最近缓存）—— 直接调 LanDiscovery.discover()
+        //   会和启动预热扫描并发跑两份 253 地址扫描，这就是 2026-10-07 实测的卡顿来源。
+        let candidates = await SessionNetworking.shared.sharedLanCandidates()
 
         // ① 命中过的设备先用缓存**立即上屏**（识别结果几乎不变：序列号不会变）
         let cache = Self.loadIdentityCache()
