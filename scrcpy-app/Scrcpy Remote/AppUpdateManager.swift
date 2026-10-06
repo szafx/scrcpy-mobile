@@ -201,12 +201,18 @@ class AppUpdateManager: ObservableObject {
     }
 
     private func openInTrollStore(_ ipa: URL) {
-        guard let encoded = ipa.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
+        // ★ 只做「最小编码」：URL 放在 url= 参数里时，只需转义会截断查询串的
+        //   字符（空格/&/?/#/+）。整串百分号编码（.alphanumerics）实测会让
+        //   TrollStore 报错拒收（2026-10-07：镜像日志只有 HEAD 探活、没有下载请求，
+        //   说明它拿到 URL 就没开始下）。最小编码对两种解析器都兼容。
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=?#+")
+        guard let encoded = ipa.absoluteString.addingPercentEncoding(withAllowedCharacters: allowed),
               let url = URL(string: Self.installSchemePrefix + encoded) else {
             print("🔄 [AppUpdate] 更新链接编码失败")
             return
         }
-        print("🔄 [AppUpdate] 唤起 TrollStore 安装：\(ipa.absoluteString)")
+        print("🔄 [AppUpdate] 唤起 TrollStore 安装：\(url.absoluteString)")
         DispatchQueue.main.async {
             UIApplication.shared.open(url)
         }
