@@ -1034,7 +1034,13 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 }
                 
                 print("📍 [SessionConnectionManager] Connection info obtained: \(finalConnectionInfo.description)")
-                
+
+                // ★★ 推 scrcpy-server 前的最后一道保险：把 adb 设备表清成「只剩本次目标」。
+                //    （详见 cleanDeviceTableForScrcpy 的注释 —— 表脏了 push 必炸
+                //      remote unknown command 32444e53，2026-10-06 真机实测）
+                await Self.cleanDeviceTableForScrcpy(
+                    keeping: "\(finalConnectionInfo.host):\(finalConnectionInfo.port)")
+
                 await MainActor.run {
                     self.setCurrentSession(session, connectionInfo: finalConnectionInfo)
                     
@@ -1083,6 +1089,47 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         }
     }
     
+    /// ★★ 推 scrcpy-server 前的最后一道保险：把 adb 设备表清成「只剩本次目标」。
+    ///
+    /// 为什么必须做：设备表里只要有多台 online 的设备（局域网发现「认序列号」、
+    /// 缓存探活、多个并发扫描互相踩……都会留下临时条目），adb 的 sync 服务
+    /// 就可能出错，push 直接失败：
+    ///   adb: error: failed to copy ... : remote unknown command 32444e53
+    /// 实测判据（2026-10-06 真机）：表里 2 台以内 push 正常；多台全 online 必炸。
+    ///
+    /// 两步：
+    ///   ① 先把目标重新 connect 一次（幂等）—— 防并发的扫描清理把目标误断
+    ///      （实测出现过：刚匹配到目标，另一个并发扫描「认完断开」把它杀了 → 直连失败）
+    ///   ② 断开表里其余所有 TCP 条目（USB 条目没有冒号，一律不动）
+    private static func cleanDeviceTableForScrcpy(keeping target: String) async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let client = ADBClient.shared()
+                _ = client.executeADBCommand(["connect", target], returnCode: nil)
+
+                let output = client.executeADBCommand(["devices"], returnCode: nil)
+                var dropped: [String] = []
+                for rawLine in output.split(separator: "\n") {
+                    let line = rawLine.trimmingCharacters(in: .whitespaces)
+                    if line.isEmpty || line.hasPrefix("List of devices") { continue }
+                    let parts = line.split(separator: "\t").map { $0.trimmingCharacters(in: .whitespaces) }
+                    guard parts.count >= 2 else { continue }
+                    let addr = parts[0]
+                    guard addr.contains(":") else { continue }   // 只处理 TCP 条目
+                    guard addr != target else { continue }       // 保留本次目标
+                    _ = client.executeADBCommand(["disconnect", addr], returnCode: nil)
+                    dropped.append(addr)
+                }
+                if dropped.isEmpty {
+                    print("[ADBCleanup] 推 server 前清表：表已干净（保留 \(target)）")
+                } else {
+                    print("[ADBCleanup] 推 server 前清表：保留 \(target)，断开 \(dropped.joined(separator: ", "))")
+                }
+                continuation.resume()
+            }
+        }
+    }
+
     /// 开始 Scrcpy 连接
     /// - Parameters:
     ///   - sessionDict: 会话字典
