@@ -40,6 +40,35 @@ final class DeviceDiscovery: ObservableObject {
     @Published var frpError: String? = nil
     @Published private(set) var running = false
 
+    /// 用户给设备起的名字：deviceId（型号-序列号后4位）→ 自定义名。
+    /// 持久保存；连接时用作会话名。清空输入 = 恢复默认显示名。
+    @Published private(set) var customNames: [String: String] = [:]
+
+    private static let customNamesKey = "settings.discovery.device_names"
+
+    init() {
+        customNames = UserDefaults.standard.dictionary(forKey: Self.customNamesKey) as? [String: String] ?? [:]
+    }
+
+    /// 显示用名字：用户起过名就用它，否则「型号 · 后4位」
+    func name(for device: DiscoveredDevice) -> String {
+        if let custom = customNames[device.id], !custom.isEmpty {
+            return custom
+        }
+        return device.displayName
+    }
+
+    /// 重命名（空字符串 = 恢复默认）
+    func rename(_ device: DiscoveredDevice, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            customNames.removeValue(forKey: device.id)
+        } else {
+            customNames[device.id] = trimmed
+        }
+        UserDefaults.standard.set(customNames, forKey: Self.customNamesKey)
+    }
+
     /// 跑一轮完整发现：先 frpc 名单（快），再局域网扫描 + 批量识别（逐台出现）。
     func run() async {
         running = true

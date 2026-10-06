@@ -69,9 +69,10 @@ struct DevicesView: View {
         .navigationBarHidden(true)
         .sheet(isPresented: $isLanScanPresented) {
             LanScanSheet(
-                onConnect: { device in
+                onConnect: { device, name in
                     isLanScanPresented = false
                     // ★ 点列表即连：构造一个**临时会话**（不落盘）。
+                    //   · sessionName 用用户起的名字（没起过就用「型号 · 后4位」）
                     //   · frpProxyName 必填 —— 它既是 frp visitor 的 proxy 名，
                     //     也是局域网匹配的「设备身份」（后缀 = 序列号后4位）
                     //   · useFrp 只有「这台挂着 frpc」才开；连接时依旧走既有的
@@ -79,7 +80,7 @@ struct DevicesView: View {
                     var model = ScrcpySessionModel()
                     model.host = device.lanHost ?? FrpSettings.load().serverAddr
                     model.port = "5555"
-                    model.sessionName = device.displayName
+                    model.sessionName = name
                     model.useFrp = device.canFrp
                     model.frpProxyName = device.frpProxyName ?? "phone-\(device.model)-\(device.suffix)"
                     onConnectSession(ScrcpySession(sessionModel: model))
@@ -290,13 +291,15 @@ private struct DeviceRow: View {
 /// 底层就是 `LanDiscovery.discover()` —— 连接时自动发现用的同一个函数，
 /// 这里只是把结果摆出来让用户挑，省得手敲 IP。
 struct LanScanSheet: View {
-    var onConnect: (DiscoveredDevice) -> Void
+    var onConnect: (DiscoveredDevice, String) -> Void
     var onManual: () -> Void
 
     @Environment(\.presentationMode) private var presentationMode
     @StateObject private var discovery = DeviceDiscovery()
     @State private var adminUser = ""
     @State private var adminPass = ""
+    @State private var renameTarget: DiscoveredDevice? = nil
+    @State private var renameText = ""
 
     var body: some View {
         NavigationView {
@@ -337,12 +340,12 @@ struct LanScanSheet: View {
                     Section(header: Text("Found")) {
                         ForEach(discovery.devices) { device in
                             Button {
-                                onConnect(device)
+                                onConnect(device, discovery.name(for: device))
                             } label: {
                                 HStack {
                                     Image(systemName: "iphone.gen3")
                                     VStack(alignment: .leading, spacing: 2) {
-                                        Text(device.displayName)
+                                        Text(discovery.name(for: device))
                                         Text(LocalizedStringKey(subtitle(device)))
                                             .font(.footnote)
                                             .foregroundColor(Theme.secondaryText)
@@ -352,6 +355,21 @@ struct LanScanSheet: View {
                                         if device.canLan { DiscoveryBadge(text: "LAN", color: .green) }
                                         if device.canFrp { DiscoveryBadge(text: "frpc", color: .blue) }
                                     }
+                                }
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button {
+                                    beginRename(device)
+                                } label: {
+                                    Label("Rename", systemImage: "pencil")
+                                }
+                                .tint(.orange)
+                            }
+                            .contextMenu {
+                                Button {
+                                    beginRename(device)
+                                } label: {
+                                    Label("Rename", systemImage: "pencil")
                                 }
                             }
                         }
@@ -381,8 +399,28 @@ struct LanScanSheet: View {
                 adminPass = saved.adminPass
                 Task { await discovery.run() }
             }
+            .alert("Rename Device", isPresented: Binding(
+                get: { renameTarget != nil },
+                set: { if !$0 { renameTarget = nil } }
+            )) {
+                TextField("Device name", text: $renameText)
+                Button("Save") {
+                    if let target = renameTarget {
+                        discovery.rename(target, to: renameText)
+                    }
+                    renameTarget = nil
+                }
+                Button("Cancel", role: .cancel) { renameTarget = nil }
+            } message: {
+                Text("Remembered for this device (model + serial suffix). Leave empty to reset.")
+            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    private func beginRename(_ device: DiscoveredDevice) {
+        renameTarget = device
+        renameText = discovery.customNames[device.id] ?? ""
     }
 
     /// 副标题：局域网就显示地址；只有 frpc 就说明走隧道
