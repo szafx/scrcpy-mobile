@@ -31,8 +31,8 @@ class AppUpdateManager: ObservableObject {
 
     // ★ 固定地址（CI 覆盖式更新，URL 永不变）
     private static let manifestURLs: [URL] = [
+        URL(string: "https://home.szafx.icu:8898/latest.json")!,   // 家里镜像优先：局域网直连、且避开本网对 GitHub 的干扰
         URL(string: "https://github.com/szafx/scrcpy-mobile/releases/download/latest-ipa/latest.json")!,
-        URL(string: "https://home.szafx.icu:8898/latest.json")!,   // 家里镜像（大陆直连）
     ]
     private static let installSchemePrefix = "apple-magnifier://install?url="
 
