@@ -19,8 +19,10 @@
 //  ★ 弹窗时序（2026-10-07 用户反馈后重做）：
 //    发现的新版本会**持久化**。只要「还没装上」且没点过「稍后」：
 //    **每次 App 打开 / 回前台都会再弹**（这一步不需要网络，也不受检查节流影响）。
-//    网络刷新（拉最新清单）另按 1 小时节流在后台跑。
+//    网络刷新（拉最新清单）另按 15 分钟节流在后台跑；**冷启动那一次强制拉**。
 //    这样「点更新 → 跳 TrollStore → 不装直接返回」会再次看到提示，直到装掉或点稍后。
+//  ★ 2026-10-07 二次修正：起因是上次检查恰好跑在新构建发布前 90 秒（判定「已是最新」），
+//    之后用户重开 App 想再看，全被 1 小时节流挡住、一直不弹。对策：冷启动 force + 节流缩到 15 分钟。
 //
 
 import Foundation
@@ -38,7 +40,7 @@ class AppUpdateManager: ObservableObject {
 
     private static let dismissedBuildKey = "AppUpdateManager.dismissedBuild"
     private static let lastCheckAtKey = "AppUpdateManager.lastCheckAt"
-    private static let minCheckInterval: TimeInterval = 3600   // 网络刷新最少隔 1 小时
+    private static let minCheckInterval: TimeInterval = 900   // 回前台时的网络刷新最少隔 15 分钟（冷启动不受限，见 App 入口）
 
     // 已知可用版本（持久化）—— 弹提示用，不依赖网络
     private static let pendingBuildKey = "AppUpdateManager.pendingBuild"

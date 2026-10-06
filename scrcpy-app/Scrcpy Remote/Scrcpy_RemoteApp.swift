@@ -50,7 +50,10 @@ struct Scrcpy_RemoteApp: App {
                     SessionNetworking.shared.warmUpLanDiscovery()
 
                     // 检查有没有新构建（CI 滚动 Release 一更新这里就会弹提示）
-                    AppUpdateManager.shared.checkForUpdate()
+                    // ★ 冷启动强制拉一次清单：用户「重开 App」就是想看有没有新版，
+                    //   不能被节流挡住（2026-10-07 实踩：上次检查跑在新构建发布前 90 秒，
+                    //   之后重开 App 全被 1 小时节流挡下，一直不弹）。
+                    AppUpdateManager.shared.checkForUpdate(force: true)
                 }
                 // 注册通知中心观察者，监听前后台切换
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
