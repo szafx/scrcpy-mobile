@@ -197,12 +197,20 @@ struct FrpSettings {
     static let tokenKey      = "settings.frp.token"
     static let secretKeyKey  = "settings.frp.secret_key"
     static let stunServerKey = "settings.frp.stun_server"
+    /// frps 管理接口（webServer）的账号 —— 用来拉「哪些设备在线」（发现页）
+    static let adminUserKey  = "settings.frp.admin_user"
+    static let adminPassKey  = "settings.frp.admin_pass"
+    /// frps 管理接口端口（frps.toml 里 webServer.port，家里是 7500）
+    static let adminPortKey  = "settings.frp.admin_port"
 
     var serverAddr: String = ""
     var serverPort: Int = 7000
     var token: String = ""
     var secretKey: String = ""
     var stunServer: String = FrpTunnel.defaultStunServer
+    var adminUser: String = ""
+    var adminPass: String = ""
+    var adminPort: Int = 7500
 
     static func load() -> FrpSettings {
         let defaults = UserDefaults.standard
@@ -224,7 +232,22 @@ struct FrpSettings {
             .trimmingCharacters(in: .whitespaces)
         settings.stunServer = stun.isEmpty ? FrpTunnel.defaultStunServer : stun
 
+        settings.adminUser = (defaults.string(forKey: adminUserKey) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        settings.adminPass = (defaults.string(forKey: adminPassKey) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        let adminPortText = (defaults.string(forKey: adminPortKey) ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        settings.adminPort = Int(adminPortText) ?? 7500
+
         return settings
+    }
+
+    /// 保存管理接口凭据（发现页里就地填写用）
+    static func saveAdmin(user: String, pass: String) {
+        let defaults = UserDefaults.standard
+        defaults.set(user.trimmingCharacters(in: .whitespaces), forKey: adminUserKey)
+        defaults.set(pass.trimmingCharacters(in: .whitespaces), forKey: adminPassKey)
     }
 
     /// 全局配置填全了没（frps 地址 + secretKey；token 允许为空 = frps 没开鉴权）。

@@ -69,12 +69,20 @@ struct DevicesView: View {
         .navigationBarHidden(true)
         .sheet(isPresented: $isLanScanPresented) {
             LanScanSheet(
-                onPick: { host, port in
+                onConnect: { device in
                     isLanScanPresented = false
-                    // 用「编辑」那条 sheet 打开一个**新建**的模型：
-                    // SessionCreateView(sessionModel:) 会把它预填好，用户确认后
-                    // SessionManager.saveSession 按 id upsert，等价于新建。
-                    onEditSession(ScrcpySession(sessionModel: ScrcpySessionModel(host: host, port: port)))
+                    // ★ 点列表即连：构造一个**临时会话**（不落盘）。
+                    //   · frpProxyName 必填 —— 它既是 frp visitor 的 proxy 名，
+                    //     也是局域网匹配的「设备身份」（后缀 = 序列号后4位）
+                    //   · useFrp 只有「这台挂着 frpc」才开；连接时依旧走既有的
+                    //     三级选路：局域网能匹配上就走局域网 → frp(P2P) → 中转
+                    var model = ScrcpySessionModel()
+                    model.host = device.lanHost ?? FrpSettings.load().serverAddr
+                    model.port = "5555"
+                    model.sessionName = device.displayName
+                    model.useFrp = device.canFrp
+                    model.frpProxyName = device.frpProxyName ?? "phone-\(device.model)-\(device.suffix)"
+                    onConnectSession(ScrcpySession(sessionModel: model))
                 },
                 onManual: {
                     isLanScanPresented = false
@@ -282,77 +290,119 @@ private struct DeviceRow: View {
 /// 底层就是 `LanDiscovery.discover()` —— 连接时自动发现用的同一个函数，
 /// 这里只是把结果摆出来让用户挑，省得手敲 IP。
 struct LanScanSheet: View {
-    var onPick: (String, String) -> Void
+    var onConnect: (DiscoveredDevice) -> Void
     var onManual: () -> Void
 
     @Environment(\.presentationMode) private var presentationMode
-    @State private var isScanning = false
-    @State private var hosts: [String] = []
-    @State private var hasScanned = false
+    @StateObject private var discovery = DeviceDiscovery()
+    @State private var adminUser = ""
+    @State private var adminPass = ""
 
     var body: some View {
         NavigationView {
             List {
                 Section {
-                    Text("Scans this iPhone's Wi-Fi subnet for Android devices listening on the ADB port (5555).")
-                        .font(.footnote)
-                        .foregroundColor(Theme.secondaryText)
-                }
-
-                if isScanning {
                     HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Scanning…")
+                        ProgressView().opacity(discovery.running ? 1 : 0)
+                        Text(LocalizedStringKey(discovery.phase.isEmpty ? "Ready" : discovery.phase))
+                            .font(.footnote)
                             .foregroundColor(Theme.secondaryText)
                     }
                 }
 
-                if hasScanned && hosts.isEmpty && !isScanning {
-                    Text("No devices found. Make sure the phone is on the same Wi-Fi and wireless debugging (adb tcpip 5555) is on.")
-                        .font(.footnote)
-                        .foregroundColor(Theme.secondaryText)
+                if let frpError = discovery.frpError {
+                    Section(header: Text("frpc online list")) {
+                        if frpError == "need frps admin account" {
+                            Text("Enter the frps admin account (webServer) to list online devices — saved once, used for every scan.")
+                                .font(.footnote)
+                                .foregroundColor(Theme.secondaryText)
+                            TextField("frps admin user", text: $adminUser)
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                            SecureField("frps admin password", text: $adminPass)
+                            Button("Save") {
+                                FrpSettings.saveAdmin(user: adminUser, pass: adminPass)
+                                Task { await discovery.run() }
+                            }
+                            .disabled(adminUser.isEmpty || adminPass.isEmpty)
+                        } else {
+                            Text(LocalizedStringKey(frpError))
+                                .font(.footnote)
+                                .foregroundColor(Theme.secondaryText)
+                        }
+                    }
                 }
 
-                if !hosts.isEmpty {
+                if !discovery.devices.isEmpty {
                     Section(header: Text("Found")) {
-                        ForEach(hosts, id: \.self) { host in
+                        ForEach(discovery.devices) { device in
                             Button {
-                                onPick(host, "5555")
+                                onConnect(device)
                             } label: {
                                 HStack {
                                     Image(systemName: "iphone.gen3")
-                                    Text(host)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(device.displayName)
+                                        Text(LocalizedStringKey(subtitle(device)))
+                                            .font(.footnote)
+                                            .foregroundColor(Theme.secondaryText)
+                                    }
                                     Spacer()
-                                    Text("Add")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundColor(Theme.accent)
+                                    HStack(spacing: 6) {
+                                        if device.canLan { DiscoveryBadge(text: "LAN", color: .green) }
+                                        if device.canFrp { DiscoveryBadge(text: "frpc", color: .blue) }
+                                    }
                                 }
                             }
                         }
                     }
                 }
+
+                if !discovery.running, discovery.devices.isEmpty, !discovery.phase.isEmpty,
+                   discovery.phase != "Ready", discovery.phase != "Done" {
+                    Text("No devices found. Make sure the phone is on the same Wi-Fi (adb tcpip 5555) or frpc is online.")
+                        .font(.footnote)
+                        .foregroundColor(Theme.secondaryText)
+                }
             }
             .listStyle(.insetGrouped)
-            .navigationBarTitle("Scan LAN", displayMode: .inline)
+            .navigationBarTitle("Discover Devices", displayMode: .inline)
             .navigationBarItems(
                 leading: Button("Manual") { onManual() },
-                trailing: Button("Done") { presentationMode.wrappedValue.dismiss() }
+                trailing: HStack(spacing: 12) {
+                    Button("Rescan") { Task { await discovery.run() } }
+                        .disabled(discovery.running)
+                    Button("Done") { presentationMode.wrappedValue.dismiss() }
+                }
             )
-            .onAppear { if !hasScanned { scan() } }
+            .onAppear {
+                let saved = FrpSettings.load()
+                adminUser = saved.adminUser
+                adminPass = saved.adminPass
+                Task { await discovery.run() }
+            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }
 
-    private func scan() {
-        isScanning = true
-        hasScanned = false
-        Task {
-            let found = await LanDiscovery.discover()
-            await MainActor.run {
-                hosts = found.map { $0.host }
-                isScanning = false
-                hasScanned = true
-            }
-        }
+    /// 副标题：局域网就显示地址；只有 frpc 就说明走隧道
+    private func subtitle(_ device: DiscoveredDevice) -> String {
+        if let host = device.lanHost { return host }
+        return "via frpc tunnel"
+    }
+}
+
+private struct DiscoveryBadge: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.15))
+            .foregroundColor(color)
+            .cornerRadius(6)
     }
 }
