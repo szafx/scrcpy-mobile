@@ -311,7 +311,7 @@ jobs:
           print(json.dumps({
               "build": os.environ["GITHUB_RUN_NUMBER"],
               "ipa": "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/releases/download/latest-ipa/ScrcpyRemote-unsigned.ipa",
-              "ipa_cn": "http://home.szafx.icu:8898/ScrcpyRemote-unsigned.ipa",
+              "ipa_cn": "https://home.szafx.icu:8898/ScrcpyRemote-unsigned.ipa",
               "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
           }))
           PYEOF

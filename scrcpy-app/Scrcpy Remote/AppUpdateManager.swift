@@ -12,7 +12,7 @@
 //  App 的构建号（CFBundleVersion）由 CI 注入为「CI 运行号」，和 latest.json 的 build 字段一对比就知道有没有新版。
 //
 //  大陆网络对 GitHub 不稳，所以做了双通道：
-//    - 清单（latest.json）：先 GitHub，失败换家里镜像 http://home.szafx.icu:8898/
+//    - 清单（latest.json）：先 GitHub，失败换家里镜像 https://home.szafx.icu:8898/
 //    - IPA 下载：优先探活家里镜像（快），不可达回退 GitHub
 //  家里镜像由家里那台机器定时从 Release 同步（见项目文档）。
 //
@@ -32,7 +32,7 @@ class AppUpdateManager: ObservableObject {
     // ★ 固定地址（CI 覆盖式更新，URL 永不变）
     private static let manifestURLs: [URL] = [
         URL(string: "https://github.com/szafx/scrcpy-mobile/releases/download/latest-ipa/latest.json")!,
-        URL(string: "http://home.szafx.icu:8898/latest.json")!,   // 家里镜像（大陆直连）
+        URL(string: "https://home.szafx.icu:8898/latest.json")!,   // 家里镜像（大陆直连）
     ]
     private static let installSchemePrefix = "apple-magnifier://install?url="
 
