@@ -209,6 +209,7 @@ jobs:
       - name: 清掉中间产物腾磁盘
         run: rm -rf porting/build
 
+      # 构建号（CFBundleVersion）= 短 sha：App 的 UpdateManager 拿它和 Release 的 latest.json 对比
       - name: 编译 App（不签名）
         working-directory: scrcpy-app
         run: |
@@ -220,6 +221,7 @@ jobs:
             -derivedDataPath build/DerivedData \
             -skipPackagePluginValidation \
             -skipMacroValidation \
+            CURRENT_PROJECT_VERSION=${GITHUB_SHA:0:8} \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY= \
@@ -287,6 +289,8 @@ jobs:
       #   目的：① 产物不过期（artifact 只留 14 天）② 下载免登录（Release 资源匿名可下）
       #   固定直链（给二维码 / 安装页用，永不变）：
       #   https://github.com/szafx/scrcpy-mobile/releases/download/latest-ipa/ScrcpyRemote-unsigned.ipa
+      #   另上传 latest.json（build/ipa/ipa_cn/date），App 内 AppUpdateManager 轮询它：
+      #   新构建 → 弹窗 → 优先家里镜像源（大陆快）→ apple-magnifier:// 唤起 TrollStore 安装
       - name: 发布到滚动 Release（免登录下载 + 不过期）
         if: github.ref == 'refs/heads/main'
         env:
@@ -295,11 +299,17 @@ jobs:
           set -euo pipefail
           TAG=latest-ipa
           IPA=$(ls out/*.ipa | head -1)
+          # latest.json：App 内热更新的版本清单（AppUpdateManager 轮询它）；
+          # ipa_cn 是家里服务器的国内镜像（大陆网络直连更快更稳），App 会先探活再用
+          SHORT_SHA=${GITHUB_SHA:0:8}
+          IPA_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/ScrcpyRemote-unsigned.ipa"
+          IPA_CN_URL="http://home.szafx.icu:8898/ScrcpyRemote-unsigned.ipa"
+          printf "{""build"":""%s"",""ipa"":""%s"",""ipa_cn"":""%s"",""date"":""%s""}" "$SHORT_SHA" "$IPA_URL" "$IPA_CN_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/latest.json
           NOTES=$(printf '自动构建的未签名 IPA（TrollStore / Sideloadly 安装）。\n\n- 提交: %s\n- 构建记录: https://github.com/%s/actions/runs/%s\n- 每次 main 构建自动覆盖更新（固定 tag: latest-ipa）\n' "${GITHUB_SHA:0:8}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$NOTES"
           else
             gh release create "$TAG" --title "最新未签名 IPA（滚动更新）" --notes "$NOTES" --latest=false
           fi
-          gh release upload "$TAG" "$IPA" --clobber
+          gh release upload "$TAG" "$IPA" out/latest.json --clobber
           echo "✅ 发布完成: https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"

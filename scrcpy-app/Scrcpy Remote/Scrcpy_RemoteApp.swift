@@ -14,6 +14,7 @@ struct Scrcpy_RemoteApp: App {
     @StateObject private var appSettings = AppSettings()
     @StateObject private var logManager = AppLogManager.shared
     @StateObject private var schemeManager = AppSchemeManagerV2.shared
+    @StateObject private var updateManager = AppUpdateManager.shared
 
     init() {
         #if DEBUG
@@ -47,6 +48,9 @@ struct Scrcpy_RemoteApp: App {
                     // 扫一遍网段要 1~2 秒，放在这里预热，等用户点连接时直接命中缓存，
                     // 不会让连接多等；扫不到（不在同一 WiFi）也不影响，会自然落到 frp。
                     SessionNetworking.shared.warmUpLanDiscovery()
+
+                    // 检查有没有新构建（CI 滚动 Release 一更新这里就会弹提示）
+                    AppUpdateManager.shared.checkForUpdate()
                 }
                 // 注册通知中心观察者，监听前后台切换
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
@@ -57,6 +61,9 @@ struct Scrcpy_RemoteApp: App {
                     if appSettings.loggingEnabled {
                         logManager.startLogging()
                     }
+
+                    // 回前台顺带查一次更新（内部有 1 小时节流，不会频繁请求）
+                    AppUpdateManager.shared.checkForUpdate()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                     // 当应用将要进入前台时应用主题
@@ -68,13 +75,25 @@ struct Scrcpy_RemoteApp: App {
                     _ = schemeManager.handleURL(url)
                 }
                 // 显示 scheme 连接提示
-                .alert("URL Scheme Connection", 
+                .alert("URL Scheme Connection",
                        isPresented: $schemeManager.shouldShowConnectionAlert) {
                     Button("OK") {
                         schemeManager.shouldShowConnectionAlert = false
                     }
                 } message: {
                     Text(schemeManager.connectionMessage)
+                }
+                // 有新构建时弹更新提示；「立即更新」唤起 TrollStore 直接装
+                .alert("Update Available",
+                       isPresented: $updateManager.shouldShowUpdateAlert) {
+                    Button("Update Now") {
+                        updateManager.updateNow()
+                    }
+                    Button("Later", role: .cancel) {
+                        updateManager.dismiss()
+                    }
+                } message: {
+                    Text("A new build (\(updateManager.availableBuild)) is available. Update now?")
                 }
         }
     }
