@@ -303,11 +303,18 @@ jobs:
           TAG=latest-ipa
           IPA=$(ls out/*.ipa | head -1)
           # latest.json：App 内热更新的版本清单（AppUpdateManager 轮询它）；
-          # ipa_cn 是家里服务器的国内镜像（大陆网络直连更快更稳），App 会先探活再用
-          SHORT_SHA=${GITHUB_SHA:0:8}
-          IPA_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/ScrcpyRemote-unsigned.ipa"
-          IPA_CN_URL="http://home.szafx.icu:8898/ScrcpyRemote-unsigned.ipa"
-          printf "{""build"":""%s"",""ipa"":""%s"",""ipa_cn"":""%s"",""date"":""%s""}" "$GITHUB_RUN_NUMBER" "$IPA_URL" "$IPA_CN_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/latest.json
+          # ipa_cn 是家里服务器的国内镜像（大陆网络直连更快更稳），App 会先探活再用。
+          # ★ 用 python 生成，别用 bash printf —— 双引号在 shell 相邻引号里会被吃掉，
+          #   2026-10-06 实测生成出无引号的非法 JSON（{build:86,...}），App 直接解析失败
+          python3 - > out/latest.json <<'PYEOF'
+          import json, os, time
+          print(json.dumps({
+              "build": os.environ["GITHUB_RUN_NUMBER"],
+              "ipa": "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/releases/download/latest-ipa/ScrcpyRemote-unsigned.ipa",
+              "ipa_cn": "http://home.szafx.icu:8898/ScrcpyRemote-unsigned.ipa",
+              "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+          }))
+          PYEOF
           NOTES=$(printf '自动构建的未签名 IPA（TrollStore / Sideloadly 安装）。\n\n- 提交: %s\n- 构建记录: https://github.com/%s/actions/runs/%s\n- 每次 main 构建自动覆盖更新（固定 tag: latest-ipa）\n' "${GITHUB_SHA:0:8}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$NOTES"
