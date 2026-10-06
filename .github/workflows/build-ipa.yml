@@ -21,6 +21,10 @@ on:
   push:
     branches: [ main ]
 
+# ★ 发布 Release 需要写权限（GITHUB_TOKEN 默认可能只有读）
+permissions:
+  contents: write
+
 # ★ 同一分支只留最新一轮。
 #   之前没配这个，连续推几个提交就会有好几个 job 同时在编（每个 ~10 分钟、还白占
 #   macOS runner 额度），得手动去停。开 cancel-in-progress 之后，
@@ -278,3 +282,24 @@ jobs:
           path: out/*.ipa
           if-no-files-found: error
           retention-days: 14
+
+      # ★ 滚动 Release：固定 tag `latest-ipa`，每次构建覆盖里面的 IPA。
+      #   目的：① 产物不过期（artifact 只留 14 天）② 下载免登录（Release 资源匿名可下）
+      #   固定直链（给二维码 / 安装页用，永不变）：
+      #   https://github.com/szafx/scrcpy-mobile/releases/download/latest-ipa/ScrcpyRemote-unsigned.ipa
+      - name: 发布到滚动 Release（免登录下载 + 不过期）
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG=latest-ipa
+          IPA=$(ls out/*.ipa | head -1)
+          NOTES=$(printf '自动构建的未签名 IPA（TrollStore / Sideloadly 安装）。\n\n- 提交: %s\n- 构建记录: https://github.com/%s/actions/runs/%s\n- 每次 main 构建自动覆盖更新（固定 tag: latest-ipa）\n' "${GITHUB_SHA:0:8}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" --title "最新未签名 IPA（滚动更新）" --notes "$NOTES" --latest=false
+          fi
+          gh release upload "$TAG" "$IPA" --clobber
+          echo "✅ 发布完成: https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"
