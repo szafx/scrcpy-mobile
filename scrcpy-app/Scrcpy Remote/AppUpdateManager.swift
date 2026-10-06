@@ -9,7 +9,7 @@
 //  Release，并向其中上传：
 //    - ScrcpyRemote-unsigned.ipa   （不签名包，TrollStore 直接装）
 //    - latest.json                 （{"build","ipa","ipa_cn","date"}）
-//  App 的构建号（CFBundleVersion）由 CI 注入为同一条短 sha，两边一对比就知道有没有新版。
+//  App 的构建号（CFBundleVersion）由 CI 注入为「CI 运行号」，和 latest.json 的 build 字段一对比就知道有没有新版。
 //
 //  大陆网络对 GitHub 不稳，所以做了双通道：
 //    - 清单（latest.json）：先 GitHub，失败换家里镜像 http://home.szafx.icu:8898/

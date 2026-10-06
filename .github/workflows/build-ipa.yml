@@ -209,7 +209,10 @@ jobs:
       - name: 清掉中间产物腾磁盘
         run: rm -rf porting/build
 
-      # 构建号（CFBundleVersion）= 短 sha：App 的 UpdateManager 拿它和 Release 的 latest.json 对比
+      # 构建号（CFBundleVersion）= CI 运行号（GITHUB_RUN_NUMBER，纯数字！）。
+      # ★ 必须是纯数字：VNCClient 目标会用这个值自动生成 C 代码 (double)<值>.，
+      #   2026-10-06 曾用短 sha（含字母）导致 "expected identifier" 编译失败。
+      # App 的 UpdateManager 拿它和 Release 里 latest.json 的 build 字段对比。
       - name: 编译 App（不签名）
         working-directory: scrcpy-app
         run: |
@@ -221,7 +224,7 @@ jobs:
             -derivedDataPath build/DerivedData \
             -skipPackagePluginValidation \
             -skipMacroValidation \
-            CURRENT_PROJECT_VERSION=${GITHUB_SHA:0:8} \
+            CURRENT_PROJECT_VERSION=${GITHUB_RUN_NUMBER} \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY= \
@@ -304,7 +307,7 @@ jobs:
           SHORT_SHA=${GITHUB_SHA:0:8}
           IPA_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/ScrcpyRemote-unsigned.ipa"
           IPA_CN_URL="http://home.szafx.icu:8898/ScrcpyRemote-unsigned.ipa"
-          printf "{""build"":""%s"",""ipa"":""%s"",""ipa_cn"":""%s"",""date"":""%s""}" "$SHORT_SHA" "$IPA_URL" "$IPA_CN_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/latest.json
+          printf "{""build"":""%s"",""ipa"":""%s"",""ipa_cn"":""%s"",""date"":""%s""}" "$GITHUB_RUN_NUMBER" "$IPA_URL" "$IPA_CN_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > out/latest.json
           NOTES=$(printf '自动构建的未签名 IPA（TrollStore / Sideloadly 安装）。\n\n- 提交: %s\n- 构建记录: https://github.com/%s/actions/runs/%s\n- 每次 main 构建自动覆盖更新（固定 tag: latest-ipa）\n' "${GITHUB_SHA:0:8}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes "$NOTES"
