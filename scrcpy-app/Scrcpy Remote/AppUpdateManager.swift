@@ -16,6 +16,12 @@
 //    - IPA 下载：优先探活家里镜像（快），不可达回退 GitHub
 //  家里镜像由家里那台机器定时从 Release 同步（见项目文档）。
 //
+//  ★ 弹窗时序（2026-10-07 用户反馈后重做）：
+//    发现的新版本会**持久化**。只要「还没装上」且没点过「稍后」：
+//    **每次 App 打开 / 回前台都会再弹**（这一步不需要网络，也不受检查节流影响）。
+//    网络刷新（拉最新清单）另按 1 小时节流在后台跑。
+//    这样「点更新 → 跳 TrollStore → 不装直接返回」会再次看到提示，直到装掉或点稍后。
+//
 
 import Foundation
 import UIKit
@@ -32,7 +38,12 @@ class AppUpdateManager: ObservableObject {
 
     private static let dismissedBuildKey = "AppUpdateManager.dismissedBuild"
     private static let lastCheckAtKey = "AppUpdateManager.lastCheckAt"
-    private static let minCheckInterval: TimeInterval = 3600   // 最少隔 1 小时才再查一次
+    private static let minCheckInterval: TimeInterval = 3600   // 网络刷新最少隔 1 小时
+
+    // 已知可用版本（持久化）—— 弹提示用，不依赖网络
+    private static let pendingBuildKey = "AppUpdateManager.pendingBuild"
+    private static let pendingIPAGitHubKey = "AppUpdateManager.pendingIPAGithub"
+    private static let pendingIPACNKey = "AppUpdateManager.pendingIPACN"
 
     @Published var shouldShowUpdateAlert = false
     @Published private(set) var availableBuild = ""
@@ -46,8 +57,13 @@ class AppUpdateManager: ObservableObject {
         let ipa_cn: String?
     }
 
-    /// 检查更新。onAppear / didBecomeActive 都会调，内部有节流。
+    /// 检查更新。onAppear / didBecomeActive 都会调。
     func checkForUpdate(force: Bool = false) {
+        // ① 先把「已知的新版本」弹出来 —— 这一步不需要网络、不受节流限制。
+        //    点更新跳 TrollStore 又没装就退回来？下次回前台还会再弹。
+        presentPendingIfNeeded()
+
+        // ② 再按节流去拉最新清单（顺带把 pending 更新为最新）
         let now = Date().timeIntervalSince1970
         let last = UserDefaults.standard.double(forKey: Self.lastCheckAtKey)
         guard force || now - last >= Self.minCheckInterval else { return }
@@ -88,6 +104,39 @@ class AppUpdateManager: ObservableObject {
 
     // MARK: - private
 
+    /// 已发现但还没装的新版本 —— 每次回前台都弹（除非已装 / 已点稍后）。
+    private func presentPendingIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard let pending = defaults.string(forKey: Self.pendingBuildKey), !pending.isEmpty else { return }
+
+        let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        if pending == current {
+            // 已经装上了 —— 清掉记录
+            clearPending()
+            return
+        }
+        if defaults.string(forKey: Self.dismissedBuildKey) == pending {
+            return   // 用户点过「稍后」
+        }
+        if shouldShowUpdateAlert, availableBuild == pending { return }   // 正在弹，别重复
+
+        availableBuild = pending
+        availableIPAGitHub = (defaults.string(forKey: Self.pendingIPAGitHubKey)).flatMap { URL(string: $0) }
+        if let cn = defaults.string(forKey: Self.pendingIPACNKey), !cn.isEmpty {
+            availableIPACN = URL(string: cn)
+        }
+        guard availableIPAGitHub != nil else { return }
+        print("🔄 [AppUpdate] 提醒：新构建 \(pending) 尚未安装")
+        shouldShowUpdateAlert = true
+    }
+
+    private func clearPending() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: Self.pendingBuildKey)
+        defaults.removeObject(forKey: Self.pendingIPAGitHubKey)
+        defaults.removeObject(forKey: Self.pendingIPACNKey)
+    }
+
     /// 依次尝试各个清单源（GitHub → 家里镜像）。
     private func fetchManifest(from index: Int) {
         guard index < Self.manifestURLs.count else {
@@ -112,23 +161,29 @@ class AppUpdateManager: ObservableObject {
     }
 
     private func handle(_ manifest: Manifest) {
+        let defaults = UserDefaults.standard
         let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+
         guard !manifest.build.isEmpty, manifest.build != current else {
+            // 已是最新 —— 清掉残留的 pending 记录
             print("🔄 [AppUpdate] 已是最新（\(current)）")
+            clearPending()
             return
         }
-        guard UserDefaults.standard.string(forKey: Self.dismissedBuildKey) != manifest.build else {
+        guard defaults.string(forKey: Self.dismissedBuildKey) != manifest.build else {
             print("🔄 [AppUpdate] 新构建 \(manifest.build) 已被跳过，不重复提示")
             return
         }
+
         print("🔄 [AppUpdate] 发现新构建：\(current) -> \(manifest.build)")
         DispatchQueue.main.async {
-            self.availableBuild = manifest.build
-            self.availableIPAGitHub = URL(string: manifest.ipa)
+            // 持久化：下次冷启动/回前台靠它弹窗（不依赖网络）
+            defaults.set(manifest.build, forKey: Self.pendingBuildKey)
+            defaults.set(manifest.ipa, forKey: Self.pendingIPAGitHubKey)
             if let cn = manifest.ipa_cn {
-                self.availableIPACN = URL(string: cn)
+                defaults.set(cn, forKey: Self.pendingIPACNKey)
             }
-            self.shouldShowUpdateAlert = true
+            self.presentPendingIfNeeded()
         }
     }
 
