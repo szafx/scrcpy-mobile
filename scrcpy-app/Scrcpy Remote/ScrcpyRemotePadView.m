@@ -2,19 +2,23 @@
 //  ScrcpyRemotePadView.m
 //  Scrcpy Remote
 //
-//  电视遥控器面板（对着雷鸟鹤6 Pro 原装遥控器的按键表做的：
-//  电源/语音/静音/信号源/设置/搜索 + 红绿蓝一键直达 + 方向环/OK
-//  + 返回/主页/菜单/最近 + 音量/频道/亮度）。
-//  按键 → ScrcpyInjectKeycodeRaw(安卓键码) → scrcpy 控制通道 → 被控设备。
+//  电视遥控器面板。按键 → scrcpy 控制通道注入安卓键码（ScrcpyInjectKeycodeRaw），
+//  或经 adb shell 走特殊路径（TCL 的设置键没有可注入键码，用 am start 打开）。
 //  方向/音量/频道/亮度按住会连发（先发一下，然后每 180ms 一发，走共同 runloop
 //  模式保证触摸跟踪期间也持续触发）。
 //
-//  注：原装遥控器的「图像模式」「音箱模式切换」是厂商私有键，安卓没有标准键码，
-//  注入不了；「语音」注入的是系统语音助手键（KEYCODE_VOICE_ASSIST）。
+//  2026-10-07 晚在雷鸟鹤6Pro(24款)上实测后的取舍：
+//   - 静音：KEYCODE_MUTE(91) 无效（物理键走 TCL 私有链路），但 KEYCODE_VOLUME_MUTE(164) 实测有效 ✓
+//   - 设置：注入 176 无效 → 改走 adb shell `am start -n com.tcl.settings/.ui.MainActivity` ✓
+//   - 语音/红/绿/蓝：原装遥控器这些键在内核层就是「未定义」的私有信号
+//     （KEY_UNKNOWN / KEY_KBD_LCD_MENU4/5 / 0x2bd），无法用任何键码复刻 → 面板不提供
+//     （语音可用电视的远场语音「小T小T」，不需要遥控器）
+//   - 搜索：原装遥控器没有这个键 + 注入无效 → 不提供
 //
 
 #import "ScrcpyRemotePadView.h"
 #import "ScrcpyADBClient.h"
+#import "ADBClient.h"
 
 #import <SDL3/SDL.h>
 
@@ -30,19 +34,13 @@ static const int KC_VOLUME_UP       = 24;
 static const int KC_VOLUME_DOWN     = 25;
 static const int KC_POWER           = 26;
 static const int KC_MENU            = 82;
-static const int KC_SEARCH          = 84;
-static const int KC_MUTE            = 91;
 static const int KC_CHANNEL_UP      = 166;
 static const int KC_CHANNEL_DOWN    = 167;
-static const int KC_SETTINGS        = 176;
+static const int KC_VOLUME_MUTE     = 164;   // 静音（KEYCODE_MUTE=91 在这台电视上无效）
 static const int KC_TV_INPUT        = 178;   // 信号源
-static const int KC_PROG_RED        = 183;   // 红键（一键直达）
-static const int KC_PROG_GREEN      = 184;   // 绿键
-static const int KC_PROG_BLUE       = 185;   // 蓝键
 static const int KC_APP_SWITCH      = 187;
 static const int KC_BRIGHTNESS_DOWN = 220;
 static const int KC_BRIGHTNESS_UP   = 221;
-static const int KC_VOICE_ASSIST    = 231;   // 语音键
 
 static const CGFloat kPadWidth  = 356.0;
 static const CGFloat kPadHeight = 300.0;
@@ -119,38 +117,29 @@ static const NSTimeInterval kRepeatInterval = 0.18;
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
     [self.headerBar addGestureRecognizer:pan];
 
-    // ---- 第一排：电源/语音/静音/信号源/设置/搜索 ----
+    // ---- 第一排：电源 / 静音 / 信号源 / 设置 ----
     NSArray *rowA = @[
         @[@"电源", @(KC_POWER)],
-        @[@"语音", @(KC_VOICE_ASSIST)],
-        @[@"静音", @(KC_MUTE)],
+        @[@"静音", @(KC_VOLUME_MUTE)],
         @[@"信号源", @(KC_TV_INPUT)],
-        @[@"设置", @(KC_SETTINGS)],
-        @[@"搜索", @(KC_SEARCH)],
+        @[@"设置", @(0)],   // 特殊：走 adb shell am start（TCL 的设置键没有可注入键码）
     ];
     for (int i = 0; i < (int)rowA.count; i++) {
         UIButton *b = [self makeButton:rowA[i][0] keycode:[rowA[i][1] intValue] repeatable:NO
-                                 frame:CGRectMake(2 + i * 59.0, 38, 52, 30) fontSize:12];
+                                 frame:CGRectMake(2 + i * 90.0, 38, 84, 30) fontSize:13];
         if ([rowA[i][1] intValue] == KC_POWER) {
             [b setTitleColor:[UIColor colorWithRed:1.0 green:0.42 blue:0.38 alpha:1.0] forState:UIControlStateNormal];
+        }
+        if ([rowA[i][0] isEqualToString:@"设置"]) {
+            [b removeTarget:self action:@selector(buttonTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [b addTarget:self action:@selector(settingsTapped) forControlEvents:UIControlEventTouchUpInside];
         }
         [self addSubview:b];
     }
 
-    // ---- 第二排：红/绿/蓝 一键直达 + 频道± ----
-    NSArray *rowB = @[
-        @[@"红", @(KC_PROG_RED), UIColor.systemRedColor],
-        @[@"绿", @(KC_PROG_GREEN), UIColor.systemGreenColor],
-        @[@"蓝", @(KC_PROG_BLUE), UIColor.systemBlueColor],
-    ];
-    for (int i = 0; i < (int)rowB.count; i++) {
-        UIButton *b = [self makeButton:rowB[i][0] keycode:[rowB[i][1] intValue] repeatable:NO
-                                 frame:CGRectMake(2 + i * 59.0, 74, 52, 28) fontSize:12];
-        [b setTitleColor:rowB[i][2] forState:UIControlStateNormal];
-        [self addSubview:b];
-    }
-    [self addSubview:[self makeButton:@"频道−" keycode:KC_CHANNEL_DOWN repeatable:YES frame:CGRectMake(192, 74, 76, 28) fontSize:12]];
-    [self addSubview:[self makeButton:@"频道+" keycode:KC_CHANNEL_UP repeatable:YES frame:CGRectMake(276, 74, 76, 28) fontSize:12]];
+    // ---- 第二排：频道± ----
+    [self addSubview:[self makeButton:@"频道−" keycode:KC_CHANNEL_DOWN repeatable:YES frame:CGRectMake(2, 74, 174, 28) fontSize:13]];
+    [self addSubview:[self makeButton:@"频道+" keycode:KC_CHANNEL_UP repeatable:YES frame:CGRectMake(182, 74, 174, 28) fontSize:13]];
 
     // ---- 左侧：方向环（3×3 网格，中心 OK）----
     UIView *dpad = [[UIView alloc] initWithFrame:CGRectMake(2, 112, 168, 168)];
@@ -258,6 +247,16 @@ static const NSTimeInterval kRepeatInterval = 0.18;
 - (void)screenOffTapped {
     ScrcpySetDisplayPower(false);
     NSLog(@"📺 [RemotePad] display OFF");
+}
+
+- (void)settingsTapped {
+    // TCL 的设置键在物理遥控器上是私有信号（内核层未定义），注入任何键码都无效；
+    // 但可以直接把它的设置 App 拉起来（实测有效）。
+    NSLog(@"📺 [RemotePad] settings via adb (TCL am start)");
+    [ADBClient.shared executeADBCommandAsync:@[@"shell", @"am start -n com.tcl.settings/.ui.MainActivity"]
+                                    callback:^(NSString * _Nullable result, int returnCode) {
+        NSLog(@"📺 [RemotePad] settings launch rc=%d %@", returnCode, result ?: @"");
+    }];
 }
 
 #pragma mark - 拖拽
