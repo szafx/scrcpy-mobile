@@ -838,6 +838,9 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     
     /// 是否已经执行过 pendingAction（防止重复执行）
     private var hasExecutedPendingAction: Bool = false
+
+    /// ★ push scrcpy-server 失败后是否已自动重试过（一次连接只重试一次，防死循环）
+    private var didAutoRetryAfterPushFailure: Bool = false
     
     /// 连接到指定会话
     /// - Parameters:
@@ -1089,41 +1092,82 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         }
     }
     
-    /// ★★ 推 scrcpy-server 前的最后一道保险：把 adb 设备表清成「只剩本次目标」。
+    /// ★★ 推 scrcpy-server 前的最后一道保险：设备表清成「只剩本次目标」并**等它稳定**。
     ///
     /// 为什么必须做：设备表里只要有多台 online 的设备（局域网发现「认序列号」、
-    /// 缓存探活、多个并发扫描互相踩……都会留下临时条目），adb 的 sync 服务
-    /// 就可能出错，push 直接失败：
+    /// 缓存探活、多个并发扫描互相踩……都会留下临时条目），或者目标 transport
+    /// 处于握手/抖动中途，adb 的 sync 服务就可能出错，push 直接失败：
     ///   adb: error: failed to copy ... : remote unknown command 32444e53
-    /// 实测判据（2026-10-06 真机）：表里 2 台以内 push 正常；多台全 online 必炸。
     ///
-    /// 两步：
-    ///   ① 先把目标重新 connect 一次（幂等）—— 防并发的扫描清理把目标误断
-    ///      （实测出现过：刚匹配到目标，另一个并发扫描「认完断开」把它杀了 → 直连失败）
-    ///   ② 断开表里其余所有 TCP 条目（USB 条目没有冒号，一律不动）
+    /// ★ 2026-10-07 深夜重做（面向 10+ 设备的根治版）：
+    ///   老版本两步（无脑重连目标 + 断开其余）踩了一个更隐蔽的坑 ——
+    ///   「重新 connect 目标」会把**本来健康的 transport 重置**，紧接着的 push
+    ///   打在一个正握手到一半的连接上 → 照样 32444e53（真机实测：表只剩 1 台
+    ///   也会炸）。而且设备一多，扫描/发现随时会把表再弄脏。
+    ///   现在：
+    ///     ① 目标已在表且是 device 态 → **不碰它**（只在缺失/异常时才补 connect）
+    ///     ② 断开其余所有 TCP 条目（USB 没有冒号，一律不动）
+    ///     ③ **健康门**：轮询等目标「连续两次采样都是 device」才放行 push；
+    ///        期间冒出来的其它条目顺手再断（并发扫描可能又加）。
+    ///        最多等 ~6 秒，超时也放行（外层还有 push 失败自动重试兜底）。
     private static func cleanDeviceTableForScrcpy(keeping target: String) async {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 let client = ADBClient.shared()
-                _ = client.executeADBCommand(["connect", target], returnCode: nil)
 
-                let output = client.executeADBCommand(["devices"], returnCode: nil)
-                var dropped: [String] = []
-                for rawLine in output.split(separator: "\n") {
-                    let line = rawLine.trimmingCharacters(in: .whitespaces)
-                    if line.isEmpty || line.hasPrefix("List of devices") { continue }
-                    let parts = line.split(separator: "\t").map { $0.trimmingCharacters(in: .whitespaces) }
-                    guard parts.count >= 2 else { continue }
-                    let addr = parts[0]
-                    guard addr.contains(":") else { continue }   // 只处理 TCP 条目
-                    guard addr != target else { continue }       // 保留本次目标
-                    _ = client.executeADBCommand(["disconnect", addr], returnCode: nil)
-                    dropped.append(addr)
+                func deviceRows() -> [(addr: String, state: String)] {
+                    let output = client.executeADBCommand(["devices"], returnCode: nil)
+                    var rows: [(String, String)] = []
+                    for rawLine in output.split(separator: "\n") {
+                        let line = rawLine.trimmingCharacters(in: .whitespaces)
+                        if line.isEmpty || line.hasPrefix("List of devices") { continue }
+                        let parts = line.split(separator: "\t").map { $0.trimmingCharacters(in: .whitespaces) }
+                        guard parts.count >= 2 else { continue }
+                        rows.append((parts[0], parts[1]))
+                    }
+                    return rows
                 }
-                if dropped.isEmpty {
-                    print("[ADBCleanup] 推 server 前清表：表已干净（保留 \(target)）")
-                } else {
+
+                // ① 只在目标缺失/状态异常时补一次 connect —— 健康时绝不动它
+                let firstRows = deviceRows()
+                if firstRows.first(where: { $0.addr == target })?.state != "device" {
+                    _ = client.executeADBCommand(["connect", target], returnCode: nil)
+                }
+
+                // ② 断开其余 TCP 条目
+                var dropped: [String] = []
+                for row in deviceRows() where row.addr.contains(":") && row.addr != target {
+                    _ = client.executeADBCommand(["disconnect", row.addr], returnCode: nil)
+                    dropped.append(row.addr)
+                }
+                if !dropped.isEmpty {
                     print("[ADBCleanup] 推 server 前清表：保留 \(target)，断开 \(dropped.joined(separator: ", "))")
+                }
+
+                // ③ 健康门：等目标稳定为 device
+                var stableCount = 0
+                var settled = false
+                for _ in 0..<24 {   // 24 × 250ms ≈ 6 秒
+                    let rows = deviceRows()
+                    let mine = rows.first { $0.addr == target }
+                    if mine?.state == "device" {
+                        stableCount += 1
+                        if stableCount >= 2 { settled = true; break }
+                    } else {
+                        stableCount = 0
+                        if mine == nil {
+                            _ = client.executeADBCommand(["connect", target], returnCode: nil)
+                        }
+                    }
+                    for row in rows where row.addr.contains(":") && row.addr != target {
+                        _ = client.executeADBCommand(["disconnect", row.addr], returnCode: nil)
+                    }
+                    Thread.sleep(forTimeInterval: 0.25)
+                }
+                if settled {
+                    print("[ADBCleanup] 目标已稳定（\(target)），放行 push")
+                } else {
+                    print("[ADBCleanup] ⚠️ 目标 6 秒内没稳定（\(target)），仍尝试 push（失败会自动重试一次）")
                 }
                 continuation.resume()
             }
@@ -1156,6 +1200,29 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                     // 如果 Tailscale 已经成功分配 IP，但连接失败，通常是目标设备服务未运行或防火墙问题。
                     if connectionInfo.isUsingTailscale {
                         print("ℹ️ [SessionConnectionManager] Tailscale connection failed. This may be due to the target service not running or a network issue. No further retries will be attempted.")
+                    }
+
+                    // ★ 专项自愈（2026-10-07，面向 10+ 设备的保险层）：
+                    //   push scrcpy-server 失败（脏表/隧道抖动时会报 remote unknown
+                    //   command 32444e53）—— 清表健康门理论上已挡住，这里兜底：
+                    //   等 2 秒让隧道缓过来，自动重试一次整条连接。
+                    if !self.didAutoRetryAfterPushFailure,
+                       let outC = scrcpy_process_get_last_output() {
+                        let out = String(cString: outC)
+                        if out.contains("32444e53") || out.contains("adb push") {
+                            self.didAutoRetryAfterPushFailure = true
+                            print("♻️ [SessionConnectionManager] push 失败（32444e53 类），2 秒后自动重试一次")
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                self.didAutoRetryAfterPushFailure = false
+                                if let session = self.currentSession,
+                                   let sc = self.reusableStatusCallback,
+                                   let ec = self.reusableErrorCallback {
+                                    self.connectToSession(session, statusCallback: sc, errorCallback: ec)
+                                } else {
+                                    print("♻️ [SessionConnectionManager] 没有可用的会话/回调，放弃自动重试")
+                                }
+                            }
+                        }
                     }
                     
                 default:
