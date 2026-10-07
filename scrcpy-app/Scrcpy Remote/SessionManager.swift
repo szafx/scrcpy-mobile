@@ -130,6 +130,7 @@ struct ADBSessionOptions: Codable, Identifiable {
     var audioEncoder: String = ""
     var maxFPS: String = "60"
     var enableAudio: Bool = false
+    var audioDup: Bool = false          // 音频双端：转发的同时保留设备扬声器（Android 13+，scrcpy --audio-dup）
     var enableClipboardSync: Bool = true
     var volumeScale: Double = 1.0
     
@@ -183,6 +184,7 @@ struct ADBSessionOptions: Codable, Identifiable {
         self.audioEncoder = try container.decodeIfPresent(String.self, forKey: .audioEncoder) ?? ""
         self.maxFPS = try container.decodeIfPresent(String.self, forKey: .maxFPS) ?? "60"
         self.enableAudio = try container.decodeIfPresent(Bool.self, forKey: .enableAudio) ?? false
+        self.audioDup = try container.decodeIfPresent(Bool.self, forKey: .audioDup) ?? false
         self.videoCodec = try container.decodeIfPresent(ADBVideoCodec.self, forKey: .videoCodec) ?? .h264
         self.enableClipboardSync = try container.decodeIfPresent(Bool.self, forKey: .enableClipboardSync) ?? true
         self.volumeScale = try container.decodeIfPresent(Double.self, forKey: .volumeScale) ?? 1.0
@@ -567,6 +569,7 @@ class SessionManager {
         adbOptions.forceAdbForward = getLegacyBoolFromKeychain("force-adb-forward", defaultValue: false)
         adbOptions.powerOffOnClose = getLegacyBoolFromKeychain("power-off-on-close", defaultValue: false)
         adbOptions.enableAudio = getLegacyBoolFromKeychain("enable-audio", defaultValue: false)
+        adbOptions.audioDup = getLegacyBoolFromKeychain("audio-dup", defaultValue: false)
         adbOptions.enableClipboardSync = true // Default for new sessions
         
         return adbOptions

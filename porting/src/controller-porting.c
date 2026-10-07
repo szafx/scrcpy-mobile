@@ -96,3 +96,15 @@ bool ScrcpyInjectKeycodeRaw(int32_t keycode) {
     msg.inject_keycode.action = AKEY_EVENT_ACTION_UP;
     return sc_controller_push_msg(g_active_controller, &msg);
 }
+
+// 亮屏/熄屏：scrcpy 的 SET_DISPLAY_POWER 控制消息（与上游快捷键 MOD+o 同款）。
+// 电视遥控器面板的「亮屏/熄屏」用；也用于纠正「连接后屏幕被关」的情况。
+bool ScrcpySetDisplayPower(bool on) {
+    if (g_active_controller == NULL) {
+        return false;
+    }
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_SET_DISPLAY_POWER;
+    msg.set_display_power.on = on;
+    return sc_controller_push_msg(g_active_controller, &msg);
+}

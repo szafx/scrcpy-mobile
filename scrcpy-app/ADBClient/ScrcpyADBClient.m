@@ -361,6 +361,7 @@ void ScrcpyTryResetVideo(void) {
         @"videoBuffer": @"--video-buffer",
         @"turnScreenOff": @"--turn-screen-off",
         @"stayAwake": @"--stay-awake",
+        @"audioDup": @"--audio-dup",
         @"powerOffOnClose": @"--power-off-on-close",
         @"noCleanup": @"--no-cleanup",
         @"forceAdbForward": @"--force-adb-forward",

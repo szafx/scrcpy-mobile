@@ -37,6 +37,14 @@ void ScrcpySendKeycodeEvent(SDL_Scancode scancode, SDL_Keycode keycode, SDL_Keym
  */
 bool ScrcpyInjectKeycodeRaw(int32_t keycode);
 
+/**
+ * Turn the remote device's display on/off (scrcpy SET_DISPLAY_POWER control
+ * message, same as upstream shortcut MOD+o). Used by the TV remote pad's
+ * 亮屏/熄屏 buttons.
+ * @param on true = screen on, false = screen off
+ */
+bool ScrcpySetDisplayPower(bool on);
+
 #ifdef __cplusplus
 }
 #endif

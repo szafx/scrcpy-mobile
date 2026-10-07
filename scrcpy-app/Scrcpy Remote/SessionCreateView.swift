@@ -32,7 +32,7 @@ struct SessionCreateView: View {
     @State private var useTailscale: Bool = false
     @State private var useFrp: Bool = false
     @State private var enableVNCaudio: Bool = false
-    @State private var enableADBaudio: Bool = false
+    @State private var audioMode: Int = 0   // 0=原设备播放(不转发) 1=控制端播放 2=双端(Android 13+)
     @State private var startNewDisplay: Bool = false
     private let isEditMode: Bool
     
@@ -81,7 +81,7 @@ struct SessionCreateView: View {
         _useTailscale = State(initialValue: sessionModel.useTailscale)
         _useFrp = State(initialValue: sessionModel.useFrp)
         _enableVNCaudio = State(initialValue: sessionModel.vncOptions.enableAudio)
-        _enableADBaudio = State(initialValue: sessionModel.adbOptions.enableAudio)
+        _audioMode = State(initialValue: sessionModel.adbOptions.enableAudio ? (sessionModel.adbOptions.audioDup ? 2 : 1) : 0)
         _startNewDisplay = State(initialValue: sessionModel.adbOptions.startNewDisplay)
         isEditMode = true
     }
@@ -276,11 +276,21 @@ struct SessionCreateView: View {
                         }
                         TextField("Max FPS, Default: 60", text: $sessionModel.adbOptions.maxFPS)
                             .keyboardType(.numberPad)
-                        Toggle("Enable Audio (Android 11+)", isOn: $enableADBaudio.animation())
-                            .onChange(of: enableADBaudio) { newValue in
-                                sessionModel.adbOptions.enableAudio = newValue
-                            }
-                        if enableADBaudio {
+                        Picker("Audio", selection: $audioMode) {
+                            Text("Off — play on remote device").tag(0)
+                            Text("Play on this device").tag(1)
+                            Text("Both — Android 13+ only").tag(2)
+                        }
+                        .onChange(of: audioMode) { mode in
+                            sessionModel.adbOptions.enableAudio = (mode != 0)
+                            sessionModel.adbOptions.audioDup = (mode == 2)
+                        }
+                        if audioMode == 2 {
+                            Text("Duplication needs Android 13+. Older devices (e.g. Android 11 TVs) may fall back to a single output.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        if audioMode != 0 {
                             Picker("Audio Codec", selection: $selectedAudioCodec) {
                                 ForEach(ADBAudioCodec.allCases, id: \.self) { codec in
                                     Text(codec.rawValue)
@@ -331,6 +341,9 @@ struct SessionCreateView: View {
                         }
                         
                         Toggle("Turn Remote Screen Off After Connected", isOn: $sessionModel.adbOptions.turnScreenOff)
+                        Text("Tip: turn this OFF for TVs — otherwise the TV screen goes dark when the session starts. (You can also flip it anytime from the TV remote pad: 亮屏/熄屏.)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                         
                         Toggle("Lock Remote Screen After Disconnected (Press Power)", isOn: $sessionModel.adbOptions.powerOffOnClose)
 
@@ -422,7 +435,7 @@ struct SessionCreateView: View {
                 // Initialize toggle state variables
                 useTailscale = sessionModel.useTailscale
                 enableVNCaudio = sessionModel.vncOptions.enableAudio
-                enableADBaudio = sessionModel.adbOptions.enableAudio
+                audioMode = sessionModel.adbOptions.enableAudio ? (sessionModel.adbOptions.audioDup ? 2 : 1) : 0
                 startNewDisplay = sessionModel.adbOptions.startNewDisplay
             }
             .onChange(of: hostInput) { newValue in

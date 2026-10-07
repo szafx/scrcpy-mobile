@@ -78,14 +78,37 @@ static const NSTimeInterval kRepeatInterval = 0.18;
     self.headerBar.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.07];
     [self addSubview:self.headerBar];
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 6, 240, 20)];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 6, 148, 20)];
     title.text = @"电视遥控器";
     title.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
     title.textColor = [UIColor colorWithWhite:1.0 alpha:0.85];
     [self.headerBar addSubview:title];
 
+    // 亮屏/熄屏（scrcpy SET_DISPLAY_POWER，连接后被关屏可以随时点回来）
+    UIButton *screenOn = [UIButton buttonWithType:UIButtonTypeSystem];
+    screenOn.frame = CGRectMake(166, 3, 70, 26);
+    [screenOn setTitle:@"亮屏" forState:UIControlStateNormal];
+    [screenOn setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.9] forState:UIControlStateNormal];
+    screenOn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    screenOn.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+    screenOn.layer.cornerRadius = 8;
+    screenOn.exclusiveTouch = YES;
+    [screenOn addTarget:self action:@selector(screenOnTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.headerBar addSubview:screenOn];
+
+    UIButton *screenOff = [UIButton buttonWithType:UIButtonTypeSystem];
+    screenOff.frame = CGRectMake(240, 3, 70, 26);
+    [screenOff setTitle:@"熄屏" forState:UIControlStateNormal];
+    [screenOff setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.9] forState:UIControlStateNormal];
+    screenOff.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    screenOff.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+    screenOff.layer.cornerRadius = 8;
+    screenOff.exclusiveTouch = YES;
+    [screenOff addTarget:self action:@selector(screenOffTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.headerBar addSubview:screenOff];
+
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(kPadWidth - 40, 2, 34, 28);
+    close.frame = CGRectMake(kPadWidth - 38, 2, 32, 28);
     [close setTitle:@"✕" forState:UIControlStateNormal];
     [close setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.7] forState:UIControlStateNormal];
     close.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
@@ -225,6 +248,16 @@ static const NSTimeInterval kRepeatInterval = 0.18;
 - (void)closeTapped {
     [self stopRepeatTimer];
     [self removeFromSuperview];
+}
+
+- (void)screenOnTapped {
+    ScrcpySetDisplayPower(true);
+    NSLog(@"📺 [RemotePad] display ON");
+}
+
+- (void)screenOffTapped {
+    ScrcpySetDisplayPower(false);
+    NSLog(@"📺 [RemotePad] display OFF");
 }
 
 #pragma mark - 拖拽
