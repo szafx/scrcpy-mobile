@@ -78,6 +78,10 @@ final class LatencyBadgeWindow {
         newWindow.badgeRef = badgeView
 
         newWindow.isHidden = false
+        // 必须放在 isHidden=false 之后：rootViewController.view 是这时候才被
+        // UIKit 插进窗口子视图的，晚一步提上来才能保证气泡在最上层（视觉上）。
+        // （触摸判定已经由 frame 负责，不依赖这里；这是双保险。）
+        newWindow.bringSubviewToFront(badgeView)
         window = newWindow
         badge = badgeView
 
@@ -138,18 +142,25 @@ final class LatencyBadgeWindow {
 
 /// 只让**气泡本身**吃触摸，其余位置一律放行给下面的投屏窗口。
 ///
-/// 做法=问一句「点中的是不是气泡（或它的后代）」——
-/// 不再依赖 SwiftUI 上报的坐标矩形（那套在 .offset 面前会错位，见文件头坑三）。
+/// ★ 2026-10-07 深夜第二修：判定改成**按气泡自己的 frame**，直接返回气泡。
+///   之前用 `super.hitTest` 的结果做判断，踩了层叠坑：气泡挂在窗口上，
+///   而 rootViewController.view（全屏、透明）会被 UIKit 后置到它上面 ——
+///   看得见气泡（上面是透明的），但 super.hitTest 永远返回那个全屏根视图，
+///   于是触摸全被判成"不是气泡"、整个气泡拖不动（用户实测 + 日志里
+///   一条「气泡移到」都没有）。
+///   frame 判定没有这个问题：气泡是窗口的直接子视图，frame 就是窗口坐标，
+///   拖动时 relayout() 实时更新 frame，判定永远跟手。
 private final class PassthroughWindow: UIWindow {
 
     weak var badgeRef: UIView?
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard let hit = super.hitTest(point, with: event) else { return nil }
-        guard let badge = badgeRef, hit === badge || hit.isDescendant(of: badge) else {
+        guard let badge = badgeRef,
+              !badge.isHidden, badge.alpha > 0.01,
+              badge.frame.contains(point) else {
             return nil   // 不是气泡 → 穿透给投屏窗口
         }
-        return hit
+        return badge
     }
 }
 
@@ -349,6 +360,7 @@ final class LatencyBadgeUIKitView: UIView {
         switch gesture.state {
         case .began:
             dragStartCorner = corner
+            print("[LatencyBadgeWindow] 按住气泡，开始拖")
 
         case .changed:
             corner = CGPoint(x: dragStartCorner.x + t.x, y: dragStartCorner.y + t.y)
