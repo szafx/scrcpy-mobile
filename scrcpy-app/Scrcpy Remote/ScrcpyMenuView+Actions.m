@@ -283,11 +283,17 @@
     return self.currentDeviceType == ScrcpyDeviceTypeADB;
 }
 
+- (BOOL)shouldShowTVRemoteOption {
+    // 电视遥控器：只对 ADB 会话有意义（触摸屏设备用不上，但也不碍事）
+    return self.currentDeviceType == ScrcpyDeviceTypeADB;
+}
+
 - (NSInteger)embeddedActionsCount {
     NSInteger count = 0;
     if ([self shouldShowSendFilesOption]) count++;
     if ([self shouldShowDumpUILayoutsOption]) count++;
     if ([self shouldShowFitDeviceWindowOption]) count++;
+    if ([self shouldShowTVRemoteOption]) count++;
     return count;
 }
 
@@ -368,6 +374,24 @@
             cell.textLabel.textColor = [UIColor whiteColor];
             cell.textLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightMedium];
             cell.detailTextLabel.text = NSLocalizedString(@"Adapt screen to current window aspect ratio", nil);
+            cell.detailTextLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.7];
+            cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
+            return cell;
+        }
+        embeddedRowIndex++;
+    }
+
+    // Check if this is the "TV Remote Pad" row (fourth embedded row for ADB devices)
+    if ([self shouldShowTVRemoteOption]) {
+        if (indexPath.row == embeddedRowIndex) {
+            UIImageSymbolConfiguration *remoteConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightMedium];
+            UIImage *remoteIcon = [[UIImage systemImageNamed:@"gamecontroller.fill" withConfiguration:remoteConfig]
+                                   imageWithTintColor:[UIColor systemYellowColor] renderingMode:UIImageRenderingModeAlwaysOriginal];
+            cell.imageView.image = [self imageWithIcon:remoteIcon inSize:iconContainerSize];
+            cell.textLabel.text = NSLocalizedString(@"电视遥控器", nil);
+            cell.textLabel.textColor = [UIColor whiteColor];
+            cell.textLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightMedium];
+            cell.detailTextLabel.text = NSLocalizedString(@"方向键 / OK / 返回 / 主页 —— 给没有触摸屏的电视用", nil);
             cell.detailTextLabel.textColor = [[UIColor whiteColor] colorWithAlphaComponent:0.7];
             cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
             return cell;
@@ -461,6 +485,20 @@
             NSLog(@"📐 [ScrcpyMenuView] Fit Device Window Size selected");
             [self hideActionsMenu];
             [self showFitDeviceWindowConfirmation];
+            return;
+        }
+        embeddedRowIndex++;
+    }
+
+    // Check if "TV Remote Pad" was tapped (fourth embedded row for ADB devices)
+    if ([self shouldShowTVRemoteOption]) {
+        if (indexPath.row == embeddedRowIndex) {
+            NSLog(@"📺 [ScrcpyMenuView] TV Remote Pad selected");
+            [self hideActionsMenu];
+            if (self.isExpanded) {
+                [self toggleMenuExpansion];
+            }
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"ScrcpyToggleRemotePadNotification" object:nil];
             return;
         }
         embeddedRowIndex++;

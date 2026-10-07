@@ -27,6 +27,16 @@ extern "C" {
  */
 void ScrcpySendKeycodeEvent(SDL_Scancode scancode, SDL_Keycode keycode, SDL_Keymod keymod);
 
+/**
+ * Inject a raw Android keycode (AKEYCODE_*) directly through the scrcpy control
+ * channel — used by the TV remote pad. Unlike ScrcpySendKeycodeEvent, the
+ * keycode is not translated through the target's keyboard map, which matters
+ * for Android TV devices (D-pad / OK navigation).
+ * @param keycode Android keycode, e.g. 19 (DPAD_UP), 23 (DPAD_CENTER)
+ * @return true if the message was queued to the active controller
+ */
+bool ScrcpyInjectKeycodeRaw(int32_t keycode);
+
 #ifdef __cplusplus
 }
 #endif

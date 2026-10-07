@@ -16,6 +16,7 @@
 #import "ScrcpyADBClient.h"
 #import "ScrcpyRuntime.h"
 #import "ScrcpyMenuView.h"
+#import "ScrcpyRemotePadView.h"
 #import "ScrcpyInputMaskView.h"
 #import "ScrcpyCommon.h"
 #import "Scrcpy_Remote-Swift.h"
@@ -36,6 +37,7 @@ static CGSize g_lastKnownViewSize = {0, 0};
 
 // Key for menuView associated object
 static char menuViewKey;
+static char remotePadViewKey;
 static char inputMaskViewKey;
 static char lockedOrientationMaskKey;
 static char orientationLockEnabledKey;
@@ -93,6 +95,16 @@ static char orientationLockEnabledKey;
 // Setter for menuView
 - (void)setMenuView:(ScrcpyMenuView *)menuView {
     objc_setAssociatedObject(self, &menuViewKey, menuView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+// Getter for remotePadView（电视遥控器面板）
+- (ScrcpyRemotePadView *)remotePadView {
+    return objc_getAssociatedObject(self, &remotePadViewKey);
+}
+
+// Setter for remotePadView
+- (void)setRemotePadView:(ScrcpyRemotePadView *)remotePadView {
+    objc_setAssociatedObject(self, &remotePadViewKey, remotePadView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // Getter for inputMaskView
@@ -278,6 +290,13 @@ static char orientationLockEnabledKey;
     [self configureMenuForCurrentDeviceType];
     
     [self.menuView addToActiveWindow];
+
+    // 电视遥控器面板的开/关（由 Actions 菜单里的「电视遥控器」项发通知触发）
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"ScrcpyToggleRemotePadNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleToggleRemotePad:)
+                                                 name:@"ScrcpyToggleRemotePadNotification"
+                                               object:nil];
     
     // 监听键盘显示和隐藏的通知
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -697,6 +716,21 @@ static char orientationLockEnabledKey;
 - (void)didTapSwitchButton {
     // 发送 Switch 按键事件 (Ctrl+S)
     ScrcpySendKeycodeEvent(SDL_SCANCODE_S, SDLK_S, SDL_KMOD_LCTRL);
+}
+
+- (void)handleToggleRemotePad:(NSNotification *)note {
+    ScrcpyRemotePadView *pad = self.remotePadView;
+    if (pad && pad.superview != nil) {
+        [pad removeFromSuperview];
+        NSLog(@"📺 [RemotePad] hidden");
+        return;
+    }
+    if (!pad) {
+        pad = [[ScrcpyRemotePadView alloc] initWithFrame:CGRectZero];
+        self.remotePadView = pad;
+    }
+    [pad addToActiveWindow];
+    NSLog(@"📺 [RemotePad] shown");
 }
 
 - (void)didTapKeyboardButton {

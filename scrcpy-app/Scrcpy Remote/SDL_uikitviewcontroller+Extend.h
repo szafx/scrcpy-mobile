@@ -11,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class ScrcpyMenuView;
 @class SessionConnectionManager;
+@class ScrcpyRemotePadView;
 
 @interface SDL_uikitviewcontroller : UIViewController
 @end
@@ -18,6 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface SDL_uikitviewcontroller (Extend)
 
 @property (nonatomic, strong) ScrcpyMenuView *menuView;
+@property (nonatomic, strong) ScrcpyRemotePadView *remotePadView;
 
 - (void)viewWillLayoutSubviews;
 - (void)viewDidLoad;
