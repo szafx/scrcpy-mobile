@@ -27,6 +27,11 @@ struct DevicesView: View {
     @State private var sessionPendingDeletion: ScrcpySession?
     @State private var showDeleteConfirm = false
 
+    // ★ 「发现设备」点选直连（临时会话）的屏幕选项：连接后是否关闭对方屏幕。
+    //   默认 **关**（被控端保持亮屏）—— 电视/临时看一眼时最不意外；
+    //   要省电（批量手机）在扫描页里打开一次即记住（同一个 key）。
+    @AppStorage("quickConnect.turnScreenOff") private var quickTurnScreenOff = false
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -83,6 +88,9 @@ struct DevicesView: View {
                     model.sessionName = name
                     model.useFrp = device.canFrp
                     model.frpProxyName = device.frpProxyName ?? "phone-\(device.model)-\(device.suffix)"
+                    // 临时会话的屏幕选项：默认保持亮屏（见 quickTurnScreenOff 的说明），
+                    // 开关在扫描页顶部，改一次即记住。
+                    model.adbOptions.turnScreenOff = quickTurnScreenOff
                     onConnectSession(ScrcpySession(sessionModel: model))
                 },
                 onManual: {
@@ -301,6 +309,9 @@ struct LanScanSheet: View {
     @State private var renameTarget: DiscoveredDevice? = nil
     @State private var renameText = ""
 
+    // 与 DevicesView 共用同一个 key：点选直连的临时会话「连上后是否熄屏」
+    @AppStorage("quickConnect.turnScreenOff") private var quickTurnScreenOff = false
+
     var body: some View {
         NavigationView {
             List {
@@ -311,6 +322,13 @@ struct LanScanSheet: View {
                             .font(.footnote)
                             .foregroundColor(Theme.secondaryText)
                     }
+                }
+
+                Section {
+                    Toggle("Turn Remote Screen Off After Connected", isOn: $quickTurnScreenOff)
+                    Text("关 = 被控端保持亮屏（电视等场景）；开 = 连上后熄屏省电。只影响「点选直连」的临时会话，改一次即记住。")
+                        .font(.footnote)
+                        .foregroundColor(Theme.secondaryText)
                 }
 
                 if let frpError = discovery.frpError {
