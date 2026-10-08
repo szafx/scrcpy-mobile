@@ -22,6 +22,9 @@ struct DevicesView: View {
     var onDuplicateSession: (ScrcpySession) -> Void = { _ in }
     var onCreateSession: () -> Void = {}
     var onOpenSettings: () -> Void = {}
+    /// ★ 点选直连：把预填好的临时会话模型交出去，弹「连接设置」页（跟普通会话同款编辑页），
+    ///   设完点「连接」直接连、不落盘。见 SessionCreateView.onConnect。
+    var onQuickConnectModel: (ScrcpySessionModel) -> Void = { _ in }
 
     @State private var isLanScanPresented = false
     @State private var sessionPendingDeletion: ScrcpySession?
@@ -89,9 +92,11 @@ struct DevicesView: View {
                     model.useFrp = device.canFrp
                     model.frpProxyName = device.frpProxyName ?? "phone-\(device.model)-\(device.suffix)"
                     // 临时会话的屏幕选项：默认保持亮屏（见 quickTurnScreenOff 的说明），
-                    // 开关在扫描页顶部，改一次即记住。
+                    // 开关在扫描页顶部，改一次即记住；进「连接设置」页后还能改全部参数。
                     model.adbOptions.turnScreenOff = quickTurnScreenOff
-                    onConnectSession(ScrcpySession(sessionModel: model))
+                    // ★ 不再直接连 —— 打开和普通会话同款的「连接设置」页（预填），
+                    //   画质/帧数/码率/音频/熄屏……全部可调，点「连接」即连、不落盘。
+                    onQuickConnectModel(model)
                 },
                 onManual: {
                     isLanScanPresented = false

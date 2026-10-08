@@ -34,6 +34,8 @@ struct RootShellView: View {
     var onEditSession: (ScrcpySession) -> Void = { _ in }
     var onDuplicateSession: (ScrcpySession) -> Void = { _ in }
     var onCreateSession: () -> Void = {}
+    /// 点选直连：预填的临时会话模型 → 弹「连接设置」页
+    var onQuickConnectModel: (ScrcpySessionModel) -> Void = { _ in }
 
     private let tabs: [ShellTab] = [
         ShellTab(id: 0, icon: "dot.radiowaves.left.and.right", title: "Devices"),
@@ -53,7 +55,8 @@ struct RootShellView: View {
                         onEditSession: onEditSession,
                         onDuplicateSession: onDuplicateSession,
                         onCreateSession: onCreateSession,
-                        onOpenSettings: { selectedTab = 2 }
+                        onOpenSettings: { selectedTab = 2 },
+                        onQuickConnectModel: onQuickConnectModel
                     )
                 }
 

@@ -35,6 +35,12 @@ struct SessionCreateView: View {
     @State private var audioMode: Int = 0   // 0=原设备播放(不转发) 1=控制端播放 2=双端(Android 13+)
     @State private var startNewDisplay: Bool = false
     private let isEditMode: Bool
+
+    /// ★ 点选直连（临时会话）用：设好参数点「连接」直接连、**不落盘**。
+    ///   nil = 普通模式（新建/编辑，显示「Save Session」）。
+    var onConnect: ((ScrcpySessionModel) -> Void)? = nil
+
+    private var isQuickConnect: Bool { onConnect != nil }
     
     // Check if ADB is auto-selected based on input (not forced by user)
     private var isADBAutoSelected: Bool {
@@ -68,7 +74,7 @@ struct SessionCreateView: View {
         isEditMode = false
     }
 
-    init(sessionModel: ScrcpySessionModel) {
+    init(sessionModel: ScrcpySessionModel, onConnect: ((ScrcpySessionModel) -> Void)? = nil) {
         _sessionModel = State(initialValue: sessionModel)
         _hostInput = State(initialValue: sessionModel.host)
         _portInput = State(initialValue: sessionModel.port)
@@ -84,6 +90,7 @@ struct SessionCreateView: View {
         _audioMode = State(initialValue: sessionModel.adbOptions.enableAudio ? (sessionModel.adbOptions.audioDup ? 2 : 1) : 0)
         _startNewDisplay = State(initialValue: sessionModel.adbOptions.startNewDisplay)
         isEditMode = true
+        self.onConnect = onConnect
     }
     
     var body: some View {
@@ -397,28 +404,46 @@ struct SessionCreateView: View {
                 }
                 
                 Section {
-                    Button(action: {
-                        // Validate session before saving (using current input values)
-                        if validateSession() {
-                            // Sync inputs to model for saving
-                            syncInputsToSessionModel()
-                            // Apply force VNC mode to session if needed
-                            applyForceVNCMode()
-                            // Save session
-                            SessionManager.shared.saveSession(sessionModel)
-                            // Pop back
-                            dismiss()
-                        } else {
-                            showingValidationError = true
+                    if let connect = onConnect {
+                        // 点选直连：设好参数直接连（临时会话，不保存）
+                        Button(action: {
+                            if validateSession() {
+                                syncInputsToSessionModel()
+                                applyForceVNCMode()
+                                connect(sessionModel)
+                                dismiss()
+                            } else {
+                                showingValidationError = true
+                            }
+                        }) {
+                            Text("连接")
+                                .bold()
+                                .frame(maxWidth: .infinity, alignment: .center)
                         }
-                    }) {
-                        Text("Save Session")
-                            .bold()
-                            .frame(maxWidth: .infinity, alignment: .center)
+                    } else {
+                        Button(action: {
+                            // Validate session before saving (using current input values)
+                            if validateSession() {
+                                // Sync inputs to model for saving
+                                syncInputsToSessionModel()
+                                // Apply force VNC mode to session if needed
+                                applyForceVNCMode()
+                                // Save session
+                                SessionManager.shared.saveSession(sessionModel)
+                                // Pop back
+                                dismiss()
+                            } else {
+                                showingValidationError = true
+                            }
+                        }) {
+                            Text("Save Session")
+                                .bold()
+                                .frame(maxWidth: .infinity, alignment: .center)
+                        }
                     }
                 }
             }
-            .navigationBarTitle(isEditMode ? "Edit Session" : "Create Session", displayMode: .inline)
+            .navigationBarTitle(isQuickConnect ? "连接设置" : (isEditMode ? "Edit Session" : "Create Session"), displayMode: .inline)
             .onAppear {
                 // Always initialize local inputs from session model when view appears.
                 // This ensures values are populated when reopening the editor.
@@ -451,25 +476,28 @@ struct SessionCreateView: View {
                         dismiss()
                     }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Save") {
-                        // Validate session before saving
-                        if validateSession() {
-                            // Sync inputs to model for saving
-                            syncInputsToSessionModel()
-                            // Apply force VNC mode to session if needed
-                            applyForceVNCMode()
-                            
-                            // Save session
-                            SessionManager.shared.saveSession(sessionModel)
-                            
-                            // Pop back
-                            dismiss()
-                        } else {
-                            showingValidationError = true
+                // 点选直连（临时会话）模式不提供「保存」—— 它本来就不落盘
+                if !isQuickConnect {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Save") {
+                            // Validate session before saving
+                            if validateSession() {
+                                // Sync inputs to model for saving
+                                syncInputsToSessionModel()
+                                // Apply force VNC mode to session if needed
+                                applyForceVNCMode()
+
+                                // Save session
+                                SessionManager.shared.saveSession(sessionModel)
+
+                                // Pop back
+                                dismiss()
+                            } else {
+                                showingValidationError = true
+                            }
                         }
+                        .font(.headline)
                     }
-                    .font(.headline)
                 }
             }
         }
