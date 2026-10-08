@@ -19,14 +19,11 @@ import SwiftUI
 enum SessionSheet: Identifiable {
     case create
     case edit(ScrcpySession)
-    /// 点选直连（发现设备）：预填好的临时会话模型 → 打开「连接设置」页（不落盘）
-    case quickConnect(ScrcpySessionModel)
 
     var id: String {
         switch self {
         case .create:            return "create"
         case .edit(let session): return "edit-\(session.id.uuidString)"
-        case .quickConnect(let model): return "quick-\(ObjectIdentifier(model).hashValue)"
         }
     }
 }
@@ -197,10 +194,6 @@ struct MainContentView: View {
             },
             onCreateSession: {
                 sessionSheet = .create
-            },
-            onQuickConnectModel: { model in
-                // 发现设备点选直连：进「连接设置」页（跟普通会话同款），设完点连接
-                sessionSheet = .quickConnect(model)
             }
         )
         // ★ 新建 / 编辑**共用这一个** sheet。见 `SessionSheet` 上面那段说明 ——
@@ -215,13 +208,6 @@ struct MainContentView: View {
             case .edit(let session):
                 SessionCreateView(sessionModel: session.sessionModel)
                     .environmentObject(appSettings)
-            case .quickConnect(let model):
-                // 临时会话：完整设置页（画质/帧数/码率/音频/熄屏……），
-                // 点「连接」直接连、不写入设备列表。
-                SessionCreateView(sessionModel: model, onConnect: { m in
-                    connectToSession(ScrcpySession(sessionModel: m))
-                })
-                .environmentObject(appSettings)
             }
         }
         .overlay {

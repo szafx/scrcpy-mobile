@@ -22,11 +22,24 @@ struct DevicesView: View {
     var onDuplicateSession: (ScrcpySession) -> Void = { _ in }
     var onCreateSession: () -> Void = {}
     var onOpenSettings: () -> Void = {}
-    /// ★ 点选直连：把预填好的临时会话模型交出去，弹「连接设置」页（跟普通会话同款编辑页），
-    ///   设完点「连接」直接连、不落盘。见 SessionCreateView.onConnect。
-    var onQuickConnectModel: (ScrcpySessionModel) -> Void = { _ in }
+
+    @EnvironmentObject var appSettings: AppSettings
+
+    /// ★ 扫描 sheet 里当前显示哪一页：nil = 扫描列表；quickConnect = 就地切到「连接设置」
+    ///   （预填、不落盘）；createSession = 就地切到「新建会话」。
+    ///
+    ///   **为什么是「就地换内容」而不是「关掉扫描页、再另开一个 sheet」**：
+    ///   2026-10-08 frida 实录 —— 点设备时「关扫描页 + 开设置页」发生在同一个 tick，
+    ///   新 sheet 的 present 请求发出后被 UIKit 直接吞掉（关的动画还在飞），
+    ///   界面栈最终为空，表现为「点设备毫无反应 / 点了不连」。
+    ///   同一个 sheet 里换内容则完全不涉及第二次 present，机制上根除。
+    private enum ScanSheetMode {
+        case quickConnect(ScrcpySessionModel)
+        case createSession
+    }
 
     @State private var isLanScanPresented = false
+    @State private var scanSheetMode: ScanSheetMode? = nil
     @State private var sessionPendingDeletion: ScrcpySession?
     @State private var showDeleteConfirm = false
 
@@ -75,34 +88,52 @@ struct DevicesView: View {
         }
         .background(Theme.background.ignoresSafeArea())
         .navigationBarHidden(true)
-        .sheet(isPresented: $isLanScanPresented) {
-            LanScanSheet(
-                onConnect: { device, name in
+        .sheet(isPresented: $isLanScanPresented, onDismiss: {
+            scanSheetMode = nil   // 关了复位，下次打开从扫描列表开始
+        }) {
+            switch scanSheetMode {
+            case .quickConnect(let model):
+                // 点选直连：和普通会话同款的「连接设置」页（预填），
+                // 画质/帧数/码率/音频/熄屏……全部可调，点「连接」即连、不落盘
+                //（保存入口在该模式下隐藏，见 SessionCreateView.isQuickConnect）。
+                SessionCreateView(sessionModel: model, onConnect: { m in
                     isLanScanPresented = false
-                    // ★ 点列表即连：构造一个**临时会话**（不落盘）。
-                    //   · sessionName 用用户起的名字（没起过就用「型号 · 后4位」）
-                    //   · frpProxyName 必填 —— 它既是 frp visitor 的 proxy 名，
-                    //     也是局域网匹配的「设备身份」（后缀 = 序列号后4位）
-                    //   · useFrp 只有「这台挂着 frpc」才开；连接时依旧走既有的
-                    //     三级选路：局域网能匹配上就走局域网 → frp(P2P) → 中转
-                    var model = ScrcpySessionModel()
-                    model.host = device.lanHost ?? FrpSettings.load().serverAddr
-                    model.port = "5555"
-                    model.sessionName = name
-                    model.useFrp = device.canFrp
-                    model.frpProxyName = device.frpProxyName ?? "phone-\(device.model)-\(device.suffix)"
-                    // 临时会话的屏幕选项：默认保持亮屏（见 quickTurnScreenOff 的说明），
-                    // 开关在扫描页顶部，改一次即记住；进「连接设置」页后还能改全部参数。
-                    model.adbOptions.turnScreenOff = quickTurnScreenOff
-                    // ★ 不再直接连 —— 打开和普通会话同款的「连接设置」页（预填），
-                    //   画质/帧数/码率/音频/熄屏……全部可调，点「连接」即连、不落盘。
-                    onQuickConnectModel(model)
-                },
-                onManual: {
-                    isLanScanPresented = false
-                    onCreateSession()
-                }
-            )
+                    onConnectSession(ScrcpySession(sessionModel: m))
+                })
+                .environmentObject(appSettings)
+
+            case .createSession:
+                SessionCreateView()
+                    .environmentObject(appSettings)
+
+            case nil:
+                LanScanSheet(
+                    onConnect: { device, name in
+                        // ★ 点列表即进「连接设置」：构造一个**临时会话**（不落盘）。
+                        //   · sessionName 用用户起的名字（没起过就用「型号 · 后4位」）
+                        //   · frpProxyName 必填 —— 它既是 frp visitor 的 proxy 名，
+                        //     也是局域网匹配的「设备身份」（后缀 = 序列号后4位）
+                        //   · useFrp 只有「这台挂着 frpc」才开；连接时依旧走既有的
+                        //     三级选路：局域网能匹配上就走局域网 → frp(P2P) → 中转
+                        var model = ScrcpySessionModel()
+                        model.host = device.lanHost ?? FrpSettings.load().serverAddr
+                        model.port = "5555"
+                        model.sessionName = name
+                        model.useFrp = device.canFrp
+                        model.frpProxyName = device.frpProxyName ?? "phone-\(device.model)-\(device.suffix)"
+                        // 临时会话的屏幕选项：默认保持亮屏（见 quickTurnScreenOff 的说明），
+                        // 开关在扫描页顶部，改一次即记住；进「连接设置」页后还能改全部参数。
+                        model.adbOptions.turnScreenOff = quickTurnScreenOff
+                        // ★ 就地切页 —— 不关 sheet（见 ScanSheetMode 的说明）
+                        scanSheetMode = .quickConnect(model)
+                    },
+                    onManual: {
+                        // 手动建会话同样就地切页：原先「关扫描页 → 由上层另开新建页」
+                        // 是同款「同 tick 二次 present」，一样会被系统吞。
+                        scanSheetMode = .createSession
+                    }
+                )
+            }
         }
         .alert(isPresented: $showDeleteConfirm) {
             Alert(
