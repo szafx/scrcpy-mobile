@@ -476,9 +476,13 @@ struct SessionCreateView: View {
                         dismiss()
                     }
                 }
-                // 点选直连（临时会话）模式不提供「保存」—— 它本来就不落盘
-                if !isQuickConnect {
-                    ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    // 点选直连（临时会话）模式不提供「保存」—— 它本来就不落盘。
+                    // ★ `if` 必须放在 ToolbarItem 的 ViewBuilder 里，不能放在
+                    //   .toolbar{} 那一层 —— 工程 target 是 iOS 15，没有
+                    //   ToolbarContentBuilder.buildIf，会报 ambiguous use of 'toolbar(content:)'
+                    //   （build 106 真机 CI 实测）
+                    if !isQuickConnect {
                         Button("Save") {
                             // Validate session before saving
                             if validateSession() {
@@ -486,10 +490,8 @@ struct SessionCreateView: View {
                                 syncInputsToSessionModel()
                                 // Apply force VNC mode to session if needed
                                 applyForceVNCMode()
-
                                 // Save session
                                 SessionManager.shared.saveSession(sessionModel)
-
                                 // Pop back
                                 dismiss()
                             } else {
