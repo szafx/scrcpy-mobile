@@ -144,7 +144,7 @@ class SessionNetworking {
     }
 
     /// 自动模式：局域网优先 → frp → Tailscale（原三级逻辑，行为与旧版完全一致）。
-    private func autoSelectConnection(for session: ScrcpySessionModel) async -> NetworkConnectionInfo? {
+    private func autoSelectConnection(session: ScrcpySessionModel) async -> NetworkConnectionInfo? {
         let originalHost = session.hostReal
         let originalPort = session.port
 
