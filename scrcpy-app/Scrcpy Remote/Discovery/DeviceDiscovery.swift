@@ -294,9 +294,13 @@ final class DeviceDiscovery: ObservableObject {
             }
         } else {
             // 已经从 frps 掉线的设备：清掉 frp 标记（打洞/中转灯变灰）
-            let onlineIds = Set(frpDevices.map { $0.id })
+            // ★ id 比较必须大小写不敏感（和 merge 同款坑）：设备行 id 可能来自 tailnet
+            //   发现源（全小写 cor-al10-1911），而 frps 名单保留 getprop 原大小写
+            //   （COR-AL10-1911）—— 精确匹配会把在线设备误判成掉线，8 秒一轮里
+            //   中转/打洞灯就会「手动刷新亮、自动刷新灭」地闪（用户 2026-10-09 实测）。
+            let onlineIds = Set(frpDevices.map { $0.id.lowercased() })
             for i in devices.indices {
-                if devices[i].frpProxyName != nil && !onlineIds.contains(devices[i].id) {
+                if devices[i].frpProxyName != nil && !onlineIds.contains(devices[i].id.lowercased()) {
                     devices[i].frpProxyName = nil
                     devices[i].relayPort = nil
                 }
