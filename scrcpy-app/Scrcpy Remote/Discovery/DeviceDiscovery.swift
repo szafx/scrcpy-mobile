@@ -85,45 +85,52 @@ final class DeviceDiscovery: ObservableObject {
         merge(frpDevices)
 
         phase = "Scanning LAN…"
-        // ★ 走共享扫描（复用预热任务/最近缓存）—— 直接调 LanDiscovery.discover()
+        // ① Bonjour 快路径：开着无线调试/adb-tcp 的手机在局域网广播，秒级出结果先上屏
+        let bonjour = await LanDiscovery.discoverBonjour()
+        await identifyAndMerge(hosts: bonjour.map { $0.host })
+
+        // ② 全量扫描兜底（走共享扫描，复用预热任务/最近缓存）—— 直接调 LanDiscovery.discover()
         //   会和启动预热扫描并发跑两份 253 地址扫描，这就是 2026-10-07 实测的卡顿来源。
         let candidates = await SessionNetworking.shared.sharedLanCandidates()
-
-        // ① 命中过的设备先用缓存**立即上屏**（识别结果几乎不变：序列号不会变）
-        let cache = Self.loadIdentityCache()
-        var needIdentify: [String] = []
-        for candidate in candidates {
-            if let cached = cache[candidate.host] {
-                merge([DiscoveredDevice(id: "\(cached.0)-\(cached.1)",
-                                        model: cached.0,
-                                        suffix: cached.1,
-                                        lanHost: candidate.host,
-                                        frpProxyName: nil)])
-            } else {
-                needIdentify.append(candidate.host)
-            }
-        }
-
-        // ② 没缓存过的批量识别（并行握手 + 串行读身份）
-        if !needIdentify.isEmpty {
-            phase = "Identifying devices…"
-            let identified = await Self.identifyMany(hosts: needIdentify)
-            var newCache = cache
-            for (host, info) in identified {
-                newCache[host] = (info.model, info.suffix)
-                merge([DiscoveredDevice(id: "\(info.model)-\(info.suffix)",
-                                        model: info.model,
-                                        suffix: info.suffix,
-                                        lanHost: host,
-                                        frpProxyName: nil)])
-            }
-            Self.saveIdentityCache(newCache)
-        }
+        await identifyAndMerge(hosts: candidates.map { $0.host })
 
         phase = devices.isEmpty ? "No devices found" : "Done"
         running = false
         // 顺手探一遍 tailnet（首页 TS 灯）
         await refreshTailnetStatus()
+    }
+
+    /// 对一批 host 做识别并上屏（走身份缓存：认过的设备秒出，没认过的并行握手 + 串行读序列号）。
+    private func identifyAndMerge(hosts: [String]) async {
+        guard !hosts.isEmpty else { return }
+        let cache = Self.loadIdentityCache()
+        var needIdentify: [String] = []
+        var newCache = cache
+
+        for host in hosts {
+            if let cached = cache[host] {
+                merge([DiscoveredDevice(id: "\(cached.0)-\(cached.1)",
+                                        model: cached.0,
+                                        suffix: cached.1,
+                                        lanHost: host,
+                                        frpProxyName: nil)])
+            } else {
+                needIdentify.append(host)
+            }
+        }
+
+        guard !needIdentify.isEmpty else { return }
+        phase = "Identifying devices…"
+        let identified = await Self.identifyMany(hosts: needIdentify)
+        for (host, info) in identified {
+            newCache[host] = (info.model, info.suffix)
+            merge([DiscoveredDevice(id: "\(info.model)-\(info.suffix)",
+                                    model: info.model,
+                                    suffix: info.suffix,
+                                    lanHost: host,
+                                    frpProxyName: nil)])
+        }
+        Self.saveIdentityCache(newCache)
     }
 
     // MARK: - 实时轻量刷新（首页轮询用）
@@ -152,12 +159,22 @@ final class DeviceDiscovery: ObservableObject {
         frpError = frpErr
         merge(frpDevices)
 
-        // 2) 已经从 frps 掉线的设备：清掉 frp 标记（打洞/中转灯变灰）
-        let onlineIds = Set(frpDevices.map { $0.id })
-        for i in devices.indices {
-            if devices[i].frpProxyName != nil && !onlineIds.contains(devices[i].id) {
+        // 2) 控制端可达性门控（用户点名的判据）：
+        //    拉 frps 名单 = 正在连「家里的 v6」。拉到了，说明**控制端这条路通**，
+        //    打洞/中转的灯才可信；拉不到（或没配账号拉不了），一律灰 —— 不装可用。
+        if frpErr != nil {
+            for i in devices.indices {
                 devices[i].frpProxyName = nil
                 devices[i].relayPort = nil
+            }
+        } else {
+            // 已经从 frps 掉线的设备：清掉 frp 标记（打洞/中转灯变灰）
+            let onlineIds = Set(frpDevices.map { $0.id })
+            for i in devices.indices {
+                if devices[i].frpProxyName != nil && !onlineIds.contains(devices[i].id) {
+                    devices[i].frpProxyName = nil
+                    devices[i].relayPort = nil
+                }
             }
         }
 
@@ -207,14 +224,35 @@ final class DeviceDiscovery: ObservableObject {
         }
     }
 
+    /// 本进程是否已经尝试过自动拉起内置 tsnet（只试一次，失败不刷屏）
+    private static var didTryAutoConnectTsnet = false
+
     /// 对 frpc 在线的设备探一遍 tailnet（首页 TS 灯）。
     ///
-    /// 名字约定：tailnet 节点名 = frpc 的 proxy 名全小写
-    /// （见 FrpcApp 的 TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
-    /// 所以拼上本节点的 MagicDNS 后缀就是它的全名。
+    /// 判据是「双端都开」（用户点名）：
+    ///   · 控制端 = **App 内置的 tsnet**（不是官方 Tailscale App）—— 没起来就先自动拉一次
+    ///   · 被控端 = FrpcApp 里内置的 relay tsnet —— 名字约定：proxy 名全小写
+    ///     （见 frpc-app 的 TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
+    ///     拼上本节点 MagicDNS 后缀就是它的全名，真拨一次 TCP 才算在线。
     func refreshTailnetStatus() async {
-        guard TailscaleManager.shared.isStarted(),
-              let suffix = TailscaleManager.shared.magicDNSSuffix() else {
+        // 控制端这一半没开：尝试拉一次（App 内置 tsnet，用户态、不占 VPN 槽）
+        if !TailscaleManager.shared.isStarted() {
+            if !Self.didTryAutoConnectTsnet {
+                Self.didTryAutoConnectTsnet = true
+                if TailscaleManager.shared.isConfigurationValid() {
+                    print("[DeviceDiscovery] 内置 tsnet 未启动 —— 自动拉起一次（TS 灯需要它）")
+                    _ = TailscaleManager.shared.ensureConnected()
+                    // 连接是异步的，给它几秒；本轮先全灰，8 秒后的下一轮就有结果
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
+            }
+            if !TailscaleManager.shared.isStarted() {
+                for i in devices.indices { devices[i].tailnetOnline = false }
+                return
+            }
+        }
+
+        guard let suffix = TailscaleManager.shared.magicDNSSuffix() else {
             for i in devices.indices { devices[i].tailnetOnline = false }
             return
         }

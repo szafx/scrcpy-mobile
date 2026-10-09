@@ -42,7 +42,7 @@ struct LanDiscovery {
     /// - Returns: 候选列表；扫不到就是空数组（不报错 —— 不在局域网是正常情况）
     static func discover(port: UInt16 = 5555,
                          timeout: TimeInterval = 0.5,
-                         batchSize: Int = 64) async -> [Candidate] {
+                         batchSize: Int = 96) async -> [Candidate] {
 
         guard let subnet = localSubnet(), isOnWiFi() else {
             print("[LanDiscovery] 当前不是 WiFi（或拿不到网段）—— 跳过扫描，直接走隧道")
@@ -77,6 +77,101 @@ struct LanDiscovery {
 
         print("[LanDiscovery] 扫完，命中 \(found.count) 台：\(found.map { $0.host })")
         return found.sorted { $0.host < $1.host }
+    }
+
+    // MARK: - Bonjour 快路径（2026-10-09）
+
+    /// 用 Bonjour 收广告，**秒级**发现开着 adb-over-WiFi 的手机，不用扫 253 个地址。
+    ///
+    /// 原理：安卓侧会广播
+    ///   · `_adb-tls-connect._tcp` —— Android 11+ 的「无线调试」开着就广播
+    ///   · `_adb._tcp`            —— 经典 `adb tcpip` 模式（实测 PGX110 两个都广播）
+    /// iPhone 的 NWBrowser 直接收，命中即用；收不到的（老安卓/没开无线调试）
+    /// 交给全量扫描兜底。
+    ///
+    /// 解析：Bonjour 结果给的是服务名不是 IP，需要建一条短连接、从路径里读远端地址；
+    /// 连接成功本身也顺带证明了「这台活着」。
+    static func discoverBonjour(timeout: TimeInterval = 2.0) async -> [Candidate] {
+        guard isOnWiFi() else { return [] }
+
+        return await withCheckedContinuation { continuation in
+            let queue = DispatchQueue(label: "com.scrcpy.bonjour")
+            let lock = NSLock()
+            var results: Set<String> = []          // "ip:port"
+            var browsers: [NWBrowser] = []
+            var finished = false
+
+            func finish() {
+                lock.lock()
+                if finished { lock.unlock(); return }
+                finished = true
+                lock.unlock()
+
+                browsers.forEach { $0.cancel() }
+                let out: [Candidate] = results.compactMap { s in
+                    let parts = s.split(separator: ":")
+                    guard parts.count == 2, let p = UInt16(parts[1]) else { return nil }
+                    return Candidate(host: String(parts[0]), port: p)
+                }.sorted { $0.host < $1.host }
+                if !out.isEmpty {
+                    print("[LanDiscovery] Bonjour 命中 \(out.count) 台：\(out.map { "\($0.host):\($0.port)" })")
+                }
+                continuation.resume(returning: out)
+            }
+
+            func addBrowser(_ type: String) {
+                let params = NWParameters.tcp
+                params.includePeerToPeer = false
+                let browser = NWBrowser(for: .bonjour(type: type, domain: nil), using: params)
+                browser.browseResultsChangedHandler = { newResults, _ in
+                    for result in newResults {
+                        Self.resolveBonjourEndpoint(result.endpoint, queue: queue) { hostPort in
+                            guard let (host, port) = hostPort else { return }
+                            lock.lock()
+                            results.insert("\(host):\(port)")
+                            lock.unlock()
+                        }
+                    }
+                }
+                browser.start(queue: queue)
+                browsers.append(browser)
+            }
+
+            addBrowser("_adb-tls-connect._tcp")
+            addBrowser("_adb._tcp")
+            queue.asyncAfter(deadline: .now() + timeout) { finish() }
+        }
+    }
+
+    /// 把 Bonjour 服务 endpoint 解析成 (ip, port)：建一条短连接读 remoteEndpoint，读完立刻断。
+    private static func resolveBonjourEndpoint(_ endpoint: NWEndpoint,
+                                               queue: DispatchQueue,
+                                               done: @escaping ((String, UInt16)?) -> Void) {
+        let conn = NWConnection(to: endpoint, using: .tcp)
+        var didFinish = false
+
+        func finish(_ value: (String, UInt16)?) {
+            guard !didFinish else { return }
+            didFinish = true
+            conn.cancel()
+            done(value)
+        }
+
+        conn.stateUpdateHandler = { state in
+            switch state {
+            case .ready, .preparing:
+                if let path = conn.currentPath,
+                   case let .hostPort(host, port) = path.remoteEndpoint {
+                    finish(("\(host)", port.rawValue))
+                }
+            case .failed, .cancelled:
+                finish(nil)
+            default:
+                break
+            }
+        }
+        conn.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 1.2) { finish(nil) }
     }
 
     // MARK: - 拿本机网段
