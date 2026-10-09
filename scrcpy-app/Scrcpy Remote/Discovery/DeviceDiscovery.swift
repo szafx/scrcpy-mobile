@@ -280,35 +280,30 @@ final class DeviceDiscovery: ObservableObject {
         }
     }
 
-    /// 本进程是否已经尝试过自动拉起内置 tsnet（只试一次，失败不刷屏）
-    private static var didTryAutoConnectTsnet = false
-
     /// 对 frpc 在线的设备探一遍 tailnet（首页 TS 灯）。
     ///
-    /// 判据（用户定稿）：**只看被控端在不在线** —— 被控端 = FrpcApp 里内置的 relay tsnet，
-    /// 名字约定：proxy 名全小写（见 frpc-app 的 TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
+    /// 判据（用户定稿）：**只看被控端在不在线** —— 被控端 = FrpcApp（或脚本版）里内置的
+    /// relay tsnet，名字约定：proxy 名全小写（TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
     /// 拼上本节点 MagicDNS 后缀就是它的全名，真拨一次 TCP 才算在线。
     /// 控制端那半（App 内置 tsnet）不算条件 —— 选 Tailscale 连接时自然会起；
-    /// 这里自动拉起只是为了**探测本身**能跑（用户态、不占 VPN 槽，代价为零）。
+    /// 这里保证它活着只是为了**探测本身**能跑（用户态、不占 VPN 槽，代价为零）。
     func refreshTailnetStatus() async {
-        // 探测需要本端 tsnet 活着：没起就自动拉一次（不把它当灯的条件）
+        // ★ 本端 tsnet 没起：**每轮都尝试拉**（ensureConnected 幂等）—— 之前「只试一次 +
+        //   睡 3 秒」的写法在冷启动首次连接慢时会永久失联（用户实测：TS 一直不亮）。
+        //   本轮先全灰，8 秒后的下一轮再探。
         if !TailscaleManager.shared.isStarted() {
-            if !Self.didTryAutoConnectTsnet {
-                Self.didTryAutoConnectTsnet = true
-                if TailscaleManager.shared.isConfigurationValid() {
-                    print("[DeviceDiscovery] 内置 tsnet 未启动 —— 自动拉起一次（TS 灯需要它）")
-                    _ = TailscaleManager.shared.ensureConnected()
-                    // 连接是异步的，给它几秒；本轮先全灰，8 秒后的下一轮就有结果
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                }
+            if TailscaleManager.shared.isConfigurationValid() {
+                print("[DeviceDiscovery] 内置 tsnet 未启动 —— 尝试拉起（探测前提，非灯的条件）")
+                _ = TailscaleManager.shared.ensureConnected()
+            } else {
+                print("[DeviceDiscovery] 内置 tsnet 未配置（设置 → Tailscale）—— TS 灯保持灰")
             }
-            if !TailscaleManager.shared.isStarted() {
-                for i in devices.indices { devices[i].tailnetOnline = false }
-                return
-            }
+            for i in devices.indices { devices[i].tailnetOnline = false }
+            return
         }
 
         guard let suffix = TailscaleManager.shared.magicDNSSuffix() else {
+            print("[DeviceDiscovery] TS 探针：拿不到 MagicDNS 后缀，本轮全灰")
             for i in devices.indices { devices[i].tailnetOnline = false }
             return
         }
@@ -335,9 +330,12 @@ final class DeviceDiscovery: ObservableObject {
             return out
         }
 
+        var hits = 0
         for (idx, ok) in results where idx < devices.count {
             devices[idx].tailnetOnline = ok
+            if ok { hits += 1 }
         }
+        print("[DeviceDiscovery] TS 探针：\(targets.count) 台，在线 \(hits) 台")
     }
 
     // MARK: - 合并

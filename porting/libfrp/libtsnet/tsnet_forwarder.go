@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
 
@@ -236,8 +237,10 @@ func (f *TSNetForwarder) stopServer() {
 // TsnetProbe 拨号探测 tailnet 上的目标是否可达（给 App 首页的「Tailscale 灯」用）。
 //
 // 为什么要真拨一次：一个 tailnet 节点在不在线，本端没有轻量查询接口；
-// 真的 Dial 一次（走内置节点的 netstack，用 MagicDNS 名或 100.x 都行）成功/失败
-// 才是诚实的判据。拨通即关，不留连接。
+// 真的 Dial 一次（走内置节点的 netstack）成功/失败才是诚实的判据。拨通即关，不留连接。
+//
+// ★ 名字先经本端 tailnet 状态解析成 100.x 再拨 —— MagicDNS 名字解析偶有不稳，
+//   状态表里的 IP 是现成的；解析不到才退回直接拨原名。
 func (f *TSNetForwarder) TsnetProbe(remoteAddr string, remotePort int, timeoutMs int) error {
 	f.mutex.RLock()
 	srv := f.server
@@ -249,11 +252,50 @@ func (f *TSNetForwarder) TsnetProbe(remoteAddr string, remotePort int, timeoutMs
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	conn, err := srv.Dial(ctx, "tcp", net.JoinHostPort(remoteAddr, fmt.Sprintf("%d", remotePort)))
+	host := remoteAddr
+	if lc, err := srv.LocalClient(); err == nil {
+		if st, err := lc.Status(ctx); err == nil {
+			if p := lookupPeerStatus(st, remoteAddr); p != nil {
+				for _, ip := range p.TailscaleIPs {
+					if ip.Is4() {
+						host = ip.String()
+						break
+					}
+				}
+			}
+		}
+	}
+
+	conn, err := srv.Dial(ctx, "tcp", net.JoinHostPort(host, fmt.Sprintf("%d", remotePort)))
 	if err != nil {
 		return err
 	}
 	conn.Close()
+	return nil
+}
+
+// lookupPeerStatus 按名字找 peer：MagicDNS 全名（可带尾点）、短名、HostName、或 100.x 都能匹配。
+func lookupPeerStatus(st *ipnstate.Status, host string) *ipnstate.PeerStatus {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, p := range st.Peer {
+		dns := strings.ToLower(strings.TrimSuffix(p.DNSName, "."))
+		if dns != "" {
+			if dns == h {
+				return p
+			}
+			if i := strings.IndexByte(dns, '.'); i > 0 && dns[:i] == h {
+				return p
+			}
+		}
+		if p.HostName != "" && strings.EqualFold(p.HostName, h) {
+			return p
+		}
+		for _, ip := range p.TailscaleIPs {
+			if ip.String() == h {
+				return p
+			}
+		}
+	}
 	return nil
 }
 
@@ -283,44 +325,20 @@ func (f *TSNetForwarder) TsnetPeerPath(host string) string {
 		return ""
 	}
 
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
-	for _, p := range st.Peer {
-		dns := strings.ToLower(strings.TrimSuffix(p.DNSName, "."))
-		match := false
-		if dns != "" {
-			if dns == h {
-				match = true
-			} else if i := strings.IndexByte(dns, '.'); i > 0 && dns[:i] == h {
-				match = true
-			}
-		}
-		if !match && p.HostName != "" && strings.EqualFold(p.HostName, h) {
-			match = true
-		}
-		if !match {
-			for _, ip := range p.TailscaleIPs {
-				if ip.String() == h {
-					match = true
-					break
-				}
-			}
-		}
-		if !match {
-			continue
-		}
-
-		if p.CurAddr != "" {
-			return "direct " + p.CurAddr
-		}
-		if p.Relay != "" {
-			return "derp " + p.Relay
-		}
-		if p.PeerRelay != "" {
-			return "peer-relay " + p.PeerRelay
-		}
-		return "unknown"
+	p := lookupPeerStatus(st, host)
+	if p == nil {
+		return ""
 	}
-	return ""
+	if p.CurAddr != "" {
+		return "direct " + p.CurAddr
+	}
+	if p.Relay != "" {
+		return "derp " + p.Relay
+	}
+	if p.PeerRelay != "" {
+		return "peer-relay " + p.PeerRelay
+	}
+	return "unknown"
 }
 
 func (f *TSNetForwarder) TsnetStartForward(remoteAddr string, remotePort int, localPort int) error {

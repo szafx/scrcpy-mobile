@@ -609,7 +609,8 @@ class TailscaleManager {
     /// 探一下 tailnet 上的目标在不在线（真拨一次 TCP，成功 = 在线）。
     /// 首页「Tailscale 灯」的判据 —— 节点在不在线没有轻量查询接口，只有真连一下才诚实。
     /// host 支持 MagicDNS 全名（phone-xxx.tailxxxx.ts.net）或 100.x 地址。
-    func probe(host: String, port: Int = 5555, timeoutMs: Int32 = 1200) -> Bool {
+    /// ★ 首次拨号含对端建立握手的开销，超时给 2.5 秒（1.2 秒在冷启动时会误判不在线）。
+    func probe(host: String, port: Int = 5555, timeoutMs: Int32 = 2500) -> Bool {
         guard isStarted() else { return false }
         return host.withCString { cstr in
             tsnet_probe(UnsafeMutablePointer(mutating: cstr), Int32(port), timeoutMs) == 0
