@@ -15,7 +15,8 @@
 //    - 清单（latest.json）：家里镜像(https，需家里 v6) → tailnet 通道(内置 tsnet，
 //      走 IPv4/DERP，公司网无 v6 也能到；家里用 tailscale serve 暴露成明文 http)
 //      → GitHub
-//    - IPA 下载：优先探活家里镜像（快），不可达回退 GitHub
+//    - IPA 下载：家里镜像(需 v6) → tailnet(https://home.taildf1173.ts.net，手机
+//      Tailscale App 开着时任何网络可用；TrollStore 走系统网络) → GitHub
 //  家里镜像由家里那台机器定时从 Release 同步（见项目文档）。
 //
 //  ★ 弹窗时序（2026-10-07 用户反馈后重做）：
@@ -41,6 +42,10 @@ class AppUpdateManager: ObservableObject {
     private static let tailnetManifestURL = URL(string: "http://home.taildf1173.ts.net/latest.json")!
     /// 通道③：GitHub Release（兜底）
     private static let githubManifestURL = URL(string: "https://github.com/szafx/scrcpy-mobile/releases/download/latest-ipa/latest.json")!
+    /// IPA 的 tailnet 候选：家里那台机器 `tailscale serve --https=443` 暴露了同一份镜像
+    /// （证书是 tailscale 自动签发的 ts.net 证书，TrollStore 直接信任）。手机 Tailscale
+    /// App 开着时，任何网络（含公司网）都能从这里装 —— TrollStore 用系统网络，走 tailnet。
+    private static let tailnetIPAURL = URL(string: "https://home.taildf1173.ts.net/ScrcpyRemote-unsigned.ipa")!
     private static let installSchemePrefix = "apple-magnifier://install?url="
 
     private static let dismissedBuildKey = "AppUpdateManager.dismissedBuild"
@@ -79,25 +84,37 @@ class AppUpdateManager: ObservableObject {
     }
 
     /// 用 TrollStore 的 scheme 直接装新版（TrollStore 会自己下载 IPA）。
-    /// 先探活家里镜像源（大陆快），不可用则回退 GitHub。
+    /// 依次探活：家里镜像源（在家最快）→ tailnet（公司网 + 手机 Tailscale App 开着
+    /// 也能装）→ GitHub（兜底）。
     func updateNow() {
         guard let github = availableIPAGitHub else {
             print("🔄 [AppUpdate] 更新链接无效")
             return
         }
-        if let cn = availableIPACN {
-            probeReachable(cn) { [weak self] ok in
-                guard let self else { return }
-                if ok {
-                    print("🔄 [AppUpdate] 家里镜像源可达，使用国内通道")
-                    self.openInTrollStore(cn)
-                } else {
-                    print("🔄 [AppUpdate] 家里镜像源不可达，回退 GitHub")
-                    self.openInTrollStore(github)
-                }
+        var candidates: [URL] = []
+        if let cn = availableIPACN { candidates.append(cn) }
+        candidates.append(Self.tailnetIPAURL)
+        candidates.append(github)
+        probeChain(candidates) { [weak self] url in
+            self?.openInTrollStore(url)
+        }
+    }
+
+    /// 逐个 HEAD 探活，第一个可达的就用；全不可达 → 用最后一个（GitHub 兜底）。
+    private func probeChain(_ urls: [URL], completion: @escaping (URL) -> Void) {
+        guard let first = urls.first else { return }
+        guard urls.count > 1 else {
+            print("🔄 [AppUpdate] 前面都不可达，回退最后一个源")
+            completion(first)
+            return
+        }
+        probeReachable(first) { [weak self] ok in
+            if ok {
+                print("🔄 [AppUpdate] 安装源可达：\(first.host ?? "?")")
+                completion(first)
+            } else {
+                self?.probeChain(Array(urls.dropFirst()), completion: completion)
             }
-        } else {
-            openInTrollStore(github)
         }
     }
 
