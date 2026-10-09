@@ -284,8 +284,8 @@ struct DevicesView: View {
                 status: statusText(for: session),
                 statusKind: statusKind(for: session),
                 lanOn: match?.canLan ?? false,
-                relayOn: match?.canRelay ?? false,
-                p2pOn: match?.canFrp ?? false,
+                relayOn: match?.relayReachable ?? false,
+                p2pOn: match?.relayReachable ?? false,
                 tsOn: match?.tailnetOnline ?? false,
                 session: session,
                 discovered: match
@@ -301,8 +301,8 @@ struct DevicesView: View {
                 status: "新发现",
                 statusKind: .idle,
                 lanOn: dev.canLan,
-                relayOn: dev.canRelay,
-                p2pOn: dev.canFrp,
+                relayOn: dev.relayReachable,
+                p2pOn: dev.relayReachable,
                 tsOn: dev.tailnetOnline,
                 session: nil,
                 discovered: dev

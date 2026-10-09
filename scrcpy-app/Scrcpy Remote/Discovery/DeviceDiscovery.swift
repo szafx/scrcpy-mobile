@@ -27,6 +27,9 @@ struct DiscoveredDevice: Identifiable {
     var lanHost: String?        // 局域网地址（nil = 不在局域网）
     var frpProxyName: String?   // frpc 在线时的 proxy 名（nil = 没挂 frpc）
     var relayPort: Int?         // frpc 的 -tcp remotePort（6000~6099；nil = 不知道）
+    /// 端到端实测：serverAddr:relayPort 真连一次通过（= 控制端→frps→frpc→adbd 整条链活）。
+    /// 「中转」「打洞」两盏灯的判据 —— 亮灯 = 连接前就已实测能连（用户点名的标准）。
+    var relayReachable: Bool = false
     var tailnetOnline: Bool = false  // tailnet 探针结果（装了带 relay 的新版 FrpcApp 且在线）
 
     var displayName: String { "\(model) · \(suffix)" }
@@ -96,8 +99,58 @@ final class DeviceDiscovery: ObservableObject {
 
         phase = devices.isEmpty ? "No devices found" : "Done"
         running = false
-        // 顺手探一遍 tailnet（首页 TS 灯）
+        // 收尾把两类探针跑一遍（首页的灯尽快出结果）
+        await refreshRelayReachability()
         await refreshTailnetStatus()
+    }
+
+    /// 端到端「中转可达」实测（用户点名的标准：亮灯 = 连接前就已实测能连）。
+    ///
+    /// 真连一次 `serverAddr:relayPort` —— 这条 TCP 走的就是 adb 会话的原路径：
+    /// 控制端 → frps → 该手机的 frpc → 手机 adbd:5555。
+    /// 连得上 ⟺ 整条链活（frps 在、frpc 在、adbd 在）；连不上 → 灯灰。
+    ///
+    /// 「打洞」灯用同一判据：打洞成不成只有真连的时候才知道（frp 内部失败会自动回落
+    /// 中转），但「端到端活」是打洞有意义的前提 —— 所以这盏灯绿 = 一定能连上
+    /// （最差走 frp 内建回落）。
+    func refreshRelayReachability() async {
+        let settings = FrpSettings.load()
+        let serverAddr = settings.serverAddr.trimmingCharacters(in: .whitespaces)
+
+        guard !serverAddr.isEmpty else {
+            for i in devices.indices { devices[i].relayReachable = false }
+            return
+        }
+
+        let targets: [(Int, String, UInt16)] = devices.enumerated().compactMap { (i, d) in
+            guard let rp = d.relayPort, let port = UInt16(exactly: rp) else { return nil }
+            return (i, serverAddr, port)
+        }
+        guard !targets.isEmpty else {
+            for i in devices.indices { devices[i].relayReachable = false }
+            return
+        }
+
+        let results = await withTaskGroup(of: (Int, Bool).self) { group -> [(Int, Bool)] in
+            for (i, host, port) in targets {
+                group.addTask {
+                    let ok = await withCheckedContinuation { cont in
+                        DispatchQueue.global(qos: .utility).async {
+                            cont.resume(returning: LanDiscovery.measureRoundTrip(host: host, port: port, timeout: 1.2) != nil)
+                        }
+                    }
+                    return (i, ok)
+                }
+            }
+            var out: [(Int, Bool)] = []
+            for await r in group { out.append(r) }
+            return out
+        }
+
+        for i in devices.indices { devices[i].relayReachable = false }
+        for (i, ok) in results where ok && i < devices.count {
+            devices[i].relayReachable = true
+        }
     }
 
     /// 对一批 host 做识别并上屏（走身份缓存：认过的设备秒出，没认过的并行握手 + 串行读序列号）。
@@ -178,7 +231,10 @@ final class DeviceDiscovery: ObservableObject {
             }
         }
 
-        // 3) tailnet 探针
+        // 3) 端到端「中转可达」实测（中转/打洞两盏灯的判据）
+        await refreshRelayReachability()
+
+        // 4) tailnet 探针
         await refreshTailnetStatus()
 
         // 4) 已知局域网地址的存活探测（每台一个 0.6s 往返；几台就几个包）
@@ -229,13 +285,13 @@ final class DeviceDiscovery: ObservableObject {
 
     /// 对 frpc 在线的设备探一遍 tailnet（首页 TS 灯）。
     ///
-    /// 判据是「双端都开」（用户点名）：
-    ///   · 控制端 = **App 内置的 tsnet**（不是官方 Tailscale App）—— 没起来就先自动拉一次
-    ///   · 被控端 = FrpcApp 里内置的 relay tsnet —— 名字约定：proxy 名全小写
-    ///     （见 frpc-app 的 TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
-    ///     拼上本节点 MagicDNS 后缀就是它的全名，真拨一次 TCP 才算在线。
+    /// 判据（用户定稿）：**只看被控端在不在线** —— 被控端 = FrpcApp 里内置的 relay tsnet，
+    /// 名字约定：proxy 名全小写（见 frpc-app 的 TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
+    /// 拼上本节点 MagicDNS 后缀就是它的全名，真拨一次 TCP 才算在线。
+    /// 控制端那半（App 内置 tsnet）不算条件 —— 选 Tailscale 连接时自然会起；
+    /// 这里自动拉起只是为了**探测本身**能跑（用户态、不占 VPN 槽，代价为零）。
     func refreshTailnetStatus() async {
-        // 控制端这一半没开：尝试拉一次（App 内置 tsnet，用户态、不占 VPN 槽）
+        // 探测需要本端 tsnet 活着：没起就自动拉一次（不把它当灯的条件）
         if !TailscaleManager.shared.isStarted() {
             if !Self.didTryAutoConnectTsnet {
                 Self.didTryAutoConnectTsnet = true
