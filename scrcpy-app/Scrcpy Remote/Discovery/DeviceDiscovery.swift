@@ -128,10 +128,24 @@ final class DeviceDiscovery: ObservableObject {
 
     // MARK: - 实时轻量刷新（首页轮询用）
 
+    /// 上一次轻量刷新时在不在 WiFi —— 用来捕捉「回到 WiFi」这个时刻补一次全量扫描
+    private var lastOnWiFi: Bool?
+
     /// 轻量刷新：只重拉 frps 名单 + 探 tailnet + 探已知局域网地址的存活。
     /// **不跑全子网扫描** —— 那玩意耗电，还会把 adb 设备表弄脏（实测 push 会失败）。
     func refreshLightweight() async {
         guard !running else { return }   // 全量扫描进行中就跳过这轮
+
+        // WiFi 切换捕捉（用户点名要求的语义）：
+        //   · 不在 WiFi（蜂窝）→ 局域网这条路根本不存在，一个包都不发（见 refreshLanLiveness）
+        //   · 刚回到 WiFi → 补一轮全量扫描，把局域网设备重新捞出来
+        let nowOnWiFi = LanDiscovery.isOnWiFi()
+        let cameBackToWiFi = (lastOnWiFi == false) && nowOnWiFi
+        lastOnWiFi = nowOnWiFi
+        if cameBackToWiFi {
+            print("[DeviceDiscovery] 回到 WiFi —— 补一轮全量扫描")
+            await run()
+        }
 
         // 1) frps 名单（xtcp + tcp 两把，1KB 级请求，可以高频）
         let (frpDevices, frpErr) = await Self.fetchFrpOnline()
@@ -155,7 +169,17 @@ final class DeviceDiscovery: ObservableObject {
     }
 
     /// 对已知的局域网地址做轻量存活探测：死掉的把 lanHost 清成 nil（灯变灰）。
+    ///
+    /// ★ 没开 WiFi（蜂窝）就直接全灰 —— 用户点名要求：这时候局域网这条路本来
+    ///   就不存在，探测只会白等一串超时，一个包都不该发。
     private func refreshLanLiveness() async {
+        guard LanDiscovery.isOnWiFi() else {
+            for i in devices.indices where devices[i].lanHost != nil {
+                devices[i].lanHost = nil
+            }
+            return
+        }
+
         let targets: [(Int, String)] = devices.enumerated().compactMap { (i, d) in
             guard let h = d.lanHost else { return nil }
             return (i, h)
