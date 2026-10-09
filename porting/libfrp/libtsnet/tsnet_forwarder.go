@@ -274,6 +274,59 @@ func (f *TSNetForwarder) TsnetProbe(remoteAddr string, remotePort int, timeoutMs
 	return nil
 }
 
+// TsnetPeerInfo 一台 tailnet 节点的摘要（App 首页「发现设备」列表用）。
+type TsnetPeerInfo struct {
+	HostName string `json:"hostName"` // tailscale 主机名（被控手机 = proxy 名小写，如 phone-cor-al10-1911）
+	DNSName  string `json:"dnsName"`  // MagicDNS 全名（尾点已去掉）
+	IP       string `json:"ip"`       // tailnet IPv4（100.x）；没有 v4 的节点跳过
+	Online   bool   `json:"online"`   // netmap 里的在线标记
+}
+
+// TsnetListPeers 列出 tailnet 里的全部节点（不含自己）。
+//
+// ★ 「Tailscale 也是发现源」的底层（2026-10-09 用户实测反馈：清掉已保存设备后
+//   纯靠扫描出不来 tailnet 里的手机 —— 因为之前 tailnet 只当指示灯、从不当发现源）。
+//   netmap 由控制面推下来、走 IPv4/DERP，**不依赖家宽公网 v6、不依赖 frps 名单、
+//   不依赖已保存会话** —— 公司网等够不到家里的场景，被控手机照样列得出来。
+//   刚登录、netmap 还没到时返回空；上层每轮重试即可（幂等）。
+func (f *TSNetForwarder) TsnetListPeers() []TsnetPeerInfo {
+	f.mutex.RLock()
+	srv := f.server
+	f.mutex.RUnlock()
+	if srv == nil {
+		return nil
+	}
+	lc, err := srv.LocalClient()
+	if err != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	st, err := lc.Status(ctx)
+	if err != nil {
+		return nil
+	}
+	out := []TsnetPeerInfo{}
+	for _, p := range st.Peer {
+		info := TsnetPeerInfo{
+			HostName: p.HostName,
+			DNSName:  strings.TrimSuffix(p.DNSName, "."),
+			Online:   p.Online,
+		}
+		for _, ip := range p.TailscaleIPs {
+			if ip.Is4() {
+				info.IP = ip.String()
+				break
+			}
+		}
+		if info.IP == "" {
+			continue // 没有 v4 的节点暂时用不上
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
 // lookupPeerStatus 按名字找 peer：MagicDNS 全名（可带尾点）、短名、HostName、或 100.x 都能匹配。
 func lookupPeerStatus(st *ipnstate.Status, host string) *ipnstate.PeerStatus {
 	h := strings.ToLower(strings.TrimSuffix(host, "."))

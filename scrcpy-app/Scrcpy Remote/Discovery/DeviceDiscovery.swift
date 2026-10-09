@@ -5,7 +5,9 @@
 //  「发现设备」的统一数据源（Devices 页的扫描面板用）：
 //    · 局域网组：扫网段 → 批量识别（型号 + 序列号后4位）→ 认完立即断开
 //    · frpc 在线组：拉 frps 管理接口（webServer）的在线 proxy 名单
-//    · 合并：同一台（型号 + 序列号后4位相同）两边都出现时合成一行，
+//    · ★ tailnet 组（2026-10-09 补）：内置 tsnet 的 netmap 里所有 `phone-*` 节点 ——
+//      **不依赖家宽 v6 / frps 名单 / 已保存会话**（公司网等够不到家里的场景照样能列出来）
+//    · 合并：同一台（型号 + 序列号后4位）多边都出现时合成一行，
 //      连接时由既有的三级连接逻辑自动「局域网 → frpc(P2P) → 中转」选路。
 //
 //  ★ 识别读的是 ro.serialno / ro.product.model，和被控端部署脚本
@@ -21,7 +23,7 @@
 import Foundation
 
 struct DiscoveredDevice: Identifiable {
-    let id: String              // "<型号>-<序列号后4位>"，如 COR-AL10-1911
+    let id: String              // "<型号>-<序列号后4位>"，如 COR-AL10-1911（合并时按大小写不敏感比）
     let model: String           // COR-AL10
     let suffix: String          // 1911
     var lanHost: String?        // 局域网地址（nil = 不在局域网）
@@ -30,7 +32,12 @@ struct DiscoveredDevice: Identifiable {
     /// 端到端实测：serverAddr:relayPort 真连一次通过（= 控制端→frps→frpc→adbd 整条链活）。
     /// 「中转」「打洞」两盏灯的判据 —— 亮灯 = 连接前就已实测能连（用户点名的标准）。
     var relayReachable: Bool = false
-    var tailnetOnline: Bool = false  // tailnet 探针结果（装了带 relay 的新版 FrpcApp 且在线）
+    var tailnetOnline: Bool = false  // tailnet 探针结果（真拨 5555 一次通过）
+    /// tailnet 主机名（= proxy 名小写，phone-<型号>-<后4位>；nil = netmap 里没有这台）。
+    /// 「设备列表的第三个发现源」靠它认人（见 mergeTailnetPeers）。
+    var tailnetName: String? = nil
+    /// tailnet IPv4（100.x）—— 点选直连时直接预填「Tailscale」方式用。
+    var tailnetHost: String? = nil
 
     var displayName: String { "\(model) · \(suffix)" }
     var canLan: Bool { lanHost != nil }
@@ -54,38 +61,101 @@ final class DeviceDiscovery: ObservableObject {
 
     init() {
         customNames = UserDefaults.standard.dictionary(forKey: Self.customNamesKey) as? [String: String] ?? [:]
+        // ★ 发现过的设备持久化回填（用户定稿 2026-10-09）：扫描到的设备自动进面板、
+        //   关掉 App 也还在；之后的扫描只更新这台设备的四盏灯（扫到就绿、没扫到就灰）。
+        //   灯先全灰，本轮扫描/探针点亮。
+        devices = Self.loadKnownDevices()
     }
 
     /// 显示用名字：用户起过名就用它，否则「型号 · 后4位」
     func name(for device: DiscoveredDevice) -> String {
-        if let custom = customNames[device.id], !custom.isEmpty {
+        if let k = customKey(for: device.id), let custom = customNames[k], !custom.isEmpty {
             return custom
         }
         return device.displayName
     }
 
+    /// 重命名输入框的回显（大小写不敏感，见 customKey）
+    func customName(for device: DiscoveredDevice) -> String? {
+        customKey(for: device.id).flatMap { customNames[$0] }
+    }
+
+    /// 大小写不敏感地找自定义名的存储键 —— tailnet 来源的 id 是小写
+    /// （cor-al10-1911），LAN/frps 来源保留 getprop 原大小写（COR-AL10-1911）。
+    private func customKey(for id: String) -> String? {
+        if customNames[id] != nil { return id }
+        return customNames.keys.first { $0.caseInsensitiveCompare(id) == .orderedSame }
+    }
+
     /// 重命名（空字符串 = 恢复默认）
     func rename(_ device: DiscoveredDevice, to newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            customNames.removeValue(forKey: device.id)
-        } else {
-            customNames[device.id] = trimmed
-        }
+        if let k = customKey(for: device.id) { customNames.removeValue(forKey: k) }
+        if !trimmed.isEmpty { customNames[device.id] = trimmed }
         UserDefaults.standard.set(customNames, forKey: Self.customNamesKey)
+    }
+
+    /// 忘记一台设备：从面板和持久化记录里都删掉（设备本身不受影响）。
+    /// 有保存会话的行删的是会话；这个删的是「扫描发现」留下的那条记录。
+    func forget(_ device: DiscoveredDevice) {
+        devices.removeAll { $0.id.caseInsensitiveCompare(device.id) == .orderedSame }
+        if let k = customKey(for: device.id) { customNames.removeValue(forKey: k) }
+        UserDefaults.standard.set(customNames, forKey: Self.customNamesKey)
+        persistKnownDevices()
+    }
+
+    // MARK: - 已知设备持久化（扫描发现 → 自动保存在面板）
+
+    /// 发现过的设备持久化 —— 关掉 App 再打开面板里还在（用户定稿 2026-10-09：
+    /// 「扫描到的设备自动保存在面板，之后扫描只更新这台设备的四盏灯」）。
+    ///
+    /// 存什么：**只存设备身份** —— 型号 + 序列号后4位（id/model/suffix），
+    /// 外加 tailnet 主机名（如果见过，它也是身份）。这样够了：
+    /// **IP / 端口一律不存** —— 它们会变，由每次的实时扫描 / frps 名单 / netmap 刷新
+    /// （用户点名：具体 ip 和端口要根据实时扫描结果变化）。
+    private static let knownDevicesKey = "settings.discovery.known_devices"
+
+    private static func loadKnownDevices() -> [DiscoveredDevice] {
+        guard let raw = UserDefaults.standard.array(forKey: knownDevicesKey) as? [[String: Any]] else {
+            return []
+        }
+        return raw.compactMap { d in
+            guard let id = d["id"] as? String,
+                  let model = d["model"] as? String,
+                  let suffix = d["suffix"] as? String else { return nil }
+            var dev = DiscoveredDevice(id: id, model: model, suffix: suffix,
+                                       lanHost: nil, frpProxyName: nil)
+            dev.tailnetName = d["tailnetName"] as? String
+            return dev
+        }
+    }
+
+    private func persistKnownDevices() {
+        let raw: [[String: Any]] = devices.map { d in
+            var m: [String: Any] = ["id": d.id, "model": d.model, "suffix": d.suffix]
+            if let tn = d.tailnetName { m["tailnetName"] = tn }
+            return m
+        }
+        UserDefaults.standard.set(raw, forKey: Self.knownDevicesKey)
     }
 
     /// 跑一轮完整发现：先 frpc 名单（快），再局域网扫描 + 批量识别（逐台出现）。
     func run() async {
         guard !running else { return }   // 已在跑（预热/上一次下拉刷新）就复用那一轮
         running = true
-        devices = []
+        // ★ 已知设备先上屏（持久化的）—— 扫描只更新灯，绝不把没扫到的设备从面板抹掉
+        //   （用户定稿 2026-10-09：「扫描到就绿、没有就灰」）。
+        devices = Self.loadKnownDevices()
         frpError = nil
 
         phase = "Getting frpc online devices…"
         let (frpDevices, frpErr) = await Self.fetchFrpOnline()
         frpError = frpErr
         merge(frpDevices)
+
+        // ★ tailnet 也是发现源（netmap，走 IPv4/DERP）—— 早并一次，够不到家里的网络里
+        //   列表也能立刻有设备；末轮 refreshTailnetStatus 还会再并一次（幂等）。
+        await mergeTailnetPeers()
 
         phase = "Scanning LAN…"
         // ① Bonjour 快路径：开着无线调试/adb-tcp 的手机在局域网广播，秒级出结果先上屏
@@ -102,6 +172,8 @@ final class DeviceDiscovery: ObservableObject {
         // 收尾把两类探针跑一遍（首页的灯尽快出结果）
         await refreshRelayReachability()
         await refreshTailnetStatus()
+        // 本轮新认到的设备（LAN 识别 / frps 名单 / tailnet netmap）全部落盘
+        persistKnownDevices()
     }
 
     /// 端到端「中转可达」实测（用户点名的标准：亮灯 = 连接前就已实测能连）。
@@ -239,6 +311,9 @@ final class DeviceDiscovery: ObservableObject {
 
         // 4) 已知局域网地址的存活探测（每台一个 0.6s 往返；几台就几个包）
         await refreshLanLiveness()
+
+        // 本轮 tailnet 并进来的新设备落盘（幂等；灯的状态不存，只存身份）
+        persistKnownDevices()
     }
 
     /// 对已知的局域网地址做轻量存活探测：死掉的把 lanHost 清成 nil（灯变灰）。
@@ -288,7 +363,7 @@ final class DeviceDiscovery: ObservableObject {
     /// tailnet 探针结果（按 proxy 名小写存）——「已保存会话」行取灯用
     @Published private(set) var sessionTailnetOnline: [String: Bool] = [:]
 
-    /// 对候选设备探一遍 tailnet（首页 TS 灯）。
+    /// 对候选设备探一遍 tailnet（首页 TS 灯）+ 把 netmap 里的节点并进列表。
     ///
     /// 判据（用户定稿）：**只看被控端在不在线** —— 被控端 = FrpcApp（或脚本版）里内置的
     /// relay tsnet，名字约定：proxy 名全小写（TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
@@ -310,33 +385,45 @@ final class DeviceDiscovery: ObservableObject {
             return
         }
 
+        // ★ tailnet 本身也是发现源：把 netmap 里的 `phone-*` 节点并进列表（幂等，每轮跑）。
+        //   这一步不依赖 suffix —— 节点的 100.x 是现成的；够不到家里的网络里就靠它出行。
+        await mergeTailnetPeers()
+
         guard let suffix = TailscaleManager.shared.magicDNSSuffix() else {
             print("[DeviceDiscovery] TS 探针：拿不到 MagicDNS 后缀，本轮全灰")
             for i in devices.indices { devices[i].tailnetOnline = false }
             return
         }
 
-        // 候选 = 发现设备 ∪ 已保存会话的身份（去重，统一小写）
-        var candidateNames = Set<String>()
+        // 探针目标：key = 小写身份名（= tailnet 主机名 = proxy 名小写）→ 真正拨的地址。
+        //   · tailnet 来源的行：直接拨 100.x（省一次名字解析，最稳）
+        //   · frps 来源的行：拼 MagicDNS 全名拨（本端状态里能解析成 100.x，见 TsnetProbe）
+        //   · 已保存会话的身份：不在上面的补进来
+        var dialHostByKey: [String: String] = [:]
         for dev in devices {
-            if let p = dev.frpProxyName, !p.isEmpty { candidateNames.insert(p.lowercased()) }
+            if let n = dev.tailnetName, !n.isEmpty {
+                dialHostByKey[n] = dev.tailnetHost ?? "\(n).\(suffix)"
+            } else if let p = dev.frpProxyName, !p.isEmpty {
+                let k = p.lowercased()
+                dialHostByKey[k] = "\(k).\(suffix)"
+            }
         }
         for p in extraProxyNames {
             let t = p.trimmingCharacters(in: .whitespaces).lowercased()
-            if !t.isEmpty { candidateNames.insert(t) }
+            if !t.isEmpty, dialHostByKey[t] == nil { dialHostByKey[t] = "\(t).\(suffix)" }
         }
-        guard !candidateNames.isEmpty else { return }
+        guard !dialHostByKey.isEmpty else { return }
 
-        let names = Array(candidateNames)
+        let targets = Array(dialHostByKey)
         let results = await withTaskGroup(of: (String, Bool).self) { group -> [(String, Bool)] in
-            for name in names {
+            for (key, host) in targets {
                 group.addTask {
                     let ok = await withCheckedContinuation { cont in
                         DispatchQueue.global(qos: .utility).async {
-                            cont.resume(returning: TailscaleManager.shared.probe(host: "\(name).\(suffix)"))
+                            cont.resume(returning: TailscaleManager.shared.probe(host: host))
                         }
                     }
-                    return (name, ok)
+                    return (key, ok)
                 }
             }
             var out: [(String, Bool)] = []
@@ -352,21 +439,64 @@ final class DeviceDiscovery: ObservableObject {
         }
         sessionTailnetOnline = onlineByName
         for i in devices.indices {
-            if let p = devices[i].frpProxyName, let ok = onlineByName[p.lowercased()] {
+            let key = devices[i].tailnetName ?? devices[i].frpProxyName?.lowercased()
+            if let k = key, let ok = onlineByName[k] {
                 devices[i].tailnetOnline = ok
             }
         }
-        print("[DeviceDiscovery] TS 探针：\(names.count) 台，在线 \(hits) 台")
+        print("[DeviceDiscovery] TS 探针：\(targets.count) 台，在线 \(hits) 台")
+    }
+
+    /// 把 tailnet netmap 里的被控手机并进设备列表 —— 「扫描」的第三个发现源。
+    ///
+    /// 数据源 = 内置 tsnet 的节点表（控制面推下来，走 IPv4/DERP）：**不依赖家宽公网 v6、
+    /// 不依赖 frps 名单、不依赖已保存会话** —— 用户 2026-10-09 实测点名的场景
+    /// （公司网无 v6 + 清空已保存设备，纯靠扫描也要能列出 tailnet 里的手机）。
+    ///
+    /// 命名约定：被控手机 relay 的 tailnet 主机名 = proxy 名小写（phone-<型号>-<后4位>），
+    /// 与 frps 名单/LAN 识别的身份（型号 + 后4位）同源，按 id 合并成一行；
+    /// 别的 tailnet 成员（本机、家里电脑等）不带 phone- 前缀，不进列表。
+    private func mergeTailnetPeers() async {
+        let peers: [TailscaleManager.TailnetPeer] = await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .utility).async {
+                cont.resume(returning: TailscaleManager.shared.listPeers())
+            }
+        }
+        guard !peers.isEmpty else { return }
+
+        var incoming: [DiscoveredDevice] = []
+        for peer in peers {
+            let name = peer.hostName.lowercased()
+            guard name.hasPrefix("phone-") else { continue }
+            let parts = name.split(separator: "-").map(String.init)
+            guard parts.count >= 3, let suffix = parts.last, suffix.count >= 3 else { continue }
+            let model = parts[1..<(parts.count - 1)].joined(separator: "-")
+            var d = DiscoveredDevice(id: "\(model)-\(suffix)",
+                                     model: model.uppercased(),
+                                     suffix: suffix.uppercased(),
+                                     lanHost: nil,
+                                     frpProxyName: nil)
+            d.tailnetName = name
+            if !peer.ip.isEmpty { d.tailnetHost = peer.ip }
+            d.tailnetOnline = peer.online   // 先给 netmap 标记；本轮探针结果随后覆盖
+            incoming.append(d)
+        }
+        merge(incoming)
     }
 
     // MARK: - 合并
 
+    /// 三路来源（LAN 识别 / frps 名单 / tailnet netmap）按身份合并成一行。
+    /// ★ id 比较**大小写不敏感**：tailnet 主机名是 proxy 名全小写（phone-cor-al10-1911），
+    ///   而 LAN 识别/frps 名单保留 getprop 的原始大小写（COR-AL10-1911）—— 不这样会同机两行。
     private func merge(_ incoming: [DiscoveredDevice]) {
         for device in incoming {
-            if let index = devices.firstIndex(where: { $0.id == device.id }) {
+            if let index = devices.firstIndex(where: { $0.id.caseInsensitiveCompare(device.id) == .orderedSame }) {
                 if let lan = device.lanHost { devices[index].lanHost = lan }
                 if let frp = device.frpProxyName { devices[index].frpProxyName = frp }
                 if let rp = device.relayPort { devices[index].relayPort = rp }
+                if let tn = device.tailnetName { devices[index].tailnetName = tn }
+                if let th = device.tailnetHost { devices[index].tailnetHost = th }
             } else {
                 devices.append(device)
             }

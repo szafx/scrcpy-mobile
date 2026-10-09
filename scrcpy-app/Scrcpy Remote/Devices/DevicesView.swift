@@ -224,7 +224,7 @@ struct DevicesView: View {
                 .textCase(nil)
 
             if homeRows.isEmpty && !discovery.running {
-                Text("还没发现设备。确保手机在同一个 WiFi（开着 adb tcpip 5555），或者它挂着 frpc 在线；下拉可重新扫描。")
+                Text("还没发现设备。确保手机在同一个 WiFi（开着 adb tcpip 5555）、挂着 frpc 在线，或它的 tailnet relay 在线；下拉可重新扫描。")
                     .font(.footnote)
                     .foregroundColor(Theme.secondaryText)
                     .padding(.vertical, 12)
@@ -249,7 +249,12 @@ struct DevicesView: View {
                     onRename: {
                         if let d = row.discovered {
                             renameTarget = d
-                            renameText = discovery.customNames[d.id] ?? ""
+                            renameText = discovery.customName(for: d) ?? ""
+                        }
+                    },
+                    onForget: {
+                        if let d = row.discovered {
+                            discovery.forget(d)
                         }
                     }
                 )
@@ -286,6 +291,8 @@ struct DevicesView: View {
                     return true
                 }
                 if let lan = dev.lanHost, lan == m.hostReal { return true }
+                // Tailscale 会话（Host 填的 100.x）与 netmap 发现的行对上，四灯取它的结果
+                if let th = dev.tailnetHost, th == m.hostReal { return true }
                 return false
             }
             if let match { usedDiscoveryIds.insert(match.id) }
@@ -329,12 +336,13 @@ struct DevicesView: View {
         savedSessions.map { $0.sessionModel.frpProxyName }.filter { !$0.isEmpty }
     }
 
-    /// 发现设备的副标题：局域网地址 > frpc 在线 > 离线
+    /// 发现设备的副标题：局域网地址 > frpc 在线 > tailnet > 离线
     private func subtitle(for dev: DiscoveredDevice) -> String {
         if let host = dev.lanHost { return "\(host):5555" }
         if let proxy = dev.frpProxyName {
             return dev.relayPort.map { "via frpc · 中转口 \($0)" } ?? "via frpc"
         }
+        if let tsHost = dev.tailnetHost { return "via Tailscale · \(tsHost):5555" }
         return "未上线"
     }
 
@@ -378,7 +386,19 @@ struct DevicesView: View {
     private func openQuickConnect(for row: HomeRow) {
         guard let dev = row.discovered else { return }
         var model = ScrcpySessionModel()
-        model.host = dev.lanHost ?? FrpSettings.load().serverAddr
+        if let lan = dev.lanHost {
+            model.host = lan
+        } else if dev.canFrp {
+            model.host = FrpSettings.load().serverAddr
+        } else if let tsHost = dev.tailnetHost {
+            // ★ 只有 tailnet 这条路（如公司网无 IPv6）：预填 100.x + 连接方式直接选
+            //   「Tailscale」—— 否则会预填够不到的家宽域名，点了也连不上。
+            model.host = tsHost
+            model.connectionMode = ConnectionMode.tailscale.rawValue
+            model.useTailscale = true
+        } else {
+            model.host = FrpSettings.load().serverAddr
+        }
         model.port = "5555"
         model.sessionName = discovery.name(for: dev)
         model.useFrp = dev.canFrp
@@ -405,6 +425,7 @@ private struct HomeDeviceRow: View {
     let onDuplicate: () -> Void
     let onDelete: () -> Void
     let onRename: () -> Void
+    let onForget: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -496,6 +517,11 @@ private struct HomeDeviceRow: View {
         .contextMenu {
             if row.discovered != nil {
                 Button { onRename() } label: { Label("重命名", systemImage: "pencil") }
+            }
+            if row.discovered != nil && row.session == nil {
+                // 扫描到的设备会自动存进面板（持久化）—— 这条是删除口；
+                // 之后要是又扫到它，会重新出现
+                Button(role: .destructive) { onForget() } label: { Label("删除记录（忘记这台）", systemImage: "trash") }
             }
             if row.session != nil {
                 Button { onConnect() } label: { Label("Connect", systemImage: "bolt.horizontal") }

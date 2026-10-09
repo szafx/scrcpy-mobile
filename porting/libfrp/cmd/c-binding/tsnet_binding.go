@@ -16,6 +16,7 @@ import "C"
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"strings"
 	"time"
@@ -211,6 +212,26 @@ func tsnet_peer_path(host *C.char) *C.char {
 		return C.CString("")
 	}
 	return C.CString(tsnetForwarder.TsnetPeerPath(C.GoString(host)))
+}
+
+// tsnet_list_peers 列出 tailnet 全部节点（JSON 数组字符串；Swift 侧负责 free）。
+// 给 App 首页「设备发现」用 —— Tailscale 本身就是一个发现源：netmap 由控制面推来，
+// 走 IPv4/DERP，不依赖家宽 v6 / frps 名单 / 已保存会话。
+//
+//export tsnet_list_peers
+func tsnet_list_peers() *C.char {
+	if tsnetForwarder == nil {
+		return C.CString("[]")
+	}
+	peers := tsnetForwarder.TsnetListPeers()
+	if peers == nil {
+		peers = []forwarder.TsnetPeerInfo{}
+	}
+	b, err := json.Marshal(peers)
+	if err != nil {
+		return C.CString("[]")
+	}
+	return C.CString(string(b))
 }
 
 // tsnet_start_forward starts port forwarding

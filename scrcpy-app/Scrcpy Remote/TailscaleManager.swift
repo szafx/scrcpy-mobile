@@ -644,6 +644,42 @@ class TailscaleManager {
         peerPathCache = (Date(), host, value)
         return value
     }
+
+    // MARK: - tailnet 节点枚举（发现源）
+
+    /// 一台 tailnet 节点的摘要（Go 侧从 netmap 导出，见 tsnet_list_peers）
+    struct TailnetPeer: Sendable {
+        let hostName: String   // 如 phone-cor-al10-1911（被控手机 = proxy 名小写）
+        let dnsName: String    // MagicDNS 全名 phone-xxx.tailxxxx.ts.net
+        let ip: String         // tailnet IPv4（100.x）
+        let online: Bool       // netmap 在线标记
+    }
+
+    /// 列出 tailnet 里的全部节点（不含自己）。本端 tsnet 没起 / 还没登录 → 空数组。
+    ///
+    /// ★ 首页设备列表的第三个发现源：netmap 由控制面推来、走 IPv4/DERP，
+    ///   不依赖家宽公网 v6、不依赖 frps 名单、不依赖已保存会话
+    ///   （2026-10-09 用户实测：清掉已保存设备 + 公司网无 v6 → 之前一个设备都列不出来）。
+    /// 调用方注意：Status() 会拿一次本节点状态锁，别在主线程上调（DeviceDiscovery 走后台队列）。
+    func listPeers() -> [TailnetPeer] {
+        guard isStarted() else { return [] }
+        guard let ptr = tsnet_list_peers() else { return [] }
+        let json = String(cString: ptr)
+        free(ptr)
+        guard let data = json.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+        return arr.compactMap { obj in
+            guard let hostName = obj["hostName"] as? String, !hostName.isEmpty else { return nil }
+            return TailnetPeer(
+                hostName: hostName,
+                dnsName: obj["dnsName"] as? String ?? "",
+                ip: obj["ip"] as? String ?? "",
+                online: obj["online"] as? Bool ?? false
+            )
+        }
+    }
     
     /// Get all available Tailscale IP addresses
     /// - Returns: Comma-separated list of IP addresses, or nil if not available
