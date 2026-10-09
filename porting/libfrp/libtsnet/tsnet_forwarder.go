@@ -327,6 +327,50 @@ func (f *TSNetForwarder) TsnetListPeers() []TsnetPeerInfo {
 	return out
 }
 
+// TsnetHTTPGet 用内置 tsnet 的网络栈 GET 一个 URL（走 tailnet）。
+//
+// ★ 更新清单的第三条通道（2026-10-09）：公司网（无 v6）既够不到家里镜像、
+// 又可能够不到 GitHub —— 但 tailnet（IPv4/DERP）永远能到家里。家里那台机器
+// 用 `tailscale serve --bg --http=80 https+insecure://localhost:8898` 把镜像
+// （latest.json）以 tailnet 内明文 HTTP 暴露在 http://home.taildf1173.ts.net/。
+//
+// 为什么不用 startForward + 本机 URLSession：serve 按 Host 头路由，
+// 转发的请求 Host 是 127.0.0.1:port，会被 404；srv.HTTPClient() 则整个
+// 请求都从 netstack 里发出，Host 就是 MagicDNS 全名，路由正确。
+//
+// 返回响应体（限 1MB）；任何失败返回空串（调用方按「此通道不可用」处理）。
+func (f *TSNetForwarder) TsnetHTTPGet(rawURL string, timeoutSeconds int) string {
+	f.mutex.RLock()
+	srv := f.server
+	f.mutex.RUnlock()
+	if srv == nil {
+		return ""
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 10
+	}
+
+	client := srv.HTTPClient()
+	client.Timeout = time.Duration(timeoutSeconds) * time.Second
+
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		log.Printf("tsnet HTTP GET 失败 %s: %v", rawURL, err)
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.Printf("tsnet HTTP GET %s 返回 %d", rawURL, resp.StatusCode)
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		log.Printf("tsnet HTTP GET 读响应失败 %s: %v", rawURL, err)
+		return ""
+	}
+	return string(body)
+}
+
 // lookupPeerStatus 按名字找 peer：MagicDNS 全名（可带尾点）、短名、HostName、或 100.x 都能匹配。
 func lookupPeerStatus(st *ipnstate.Status, host string) *ipnstate.PeerStatus {
 	h := strings.ToLower(strings.TrimSuffix(host, "."))

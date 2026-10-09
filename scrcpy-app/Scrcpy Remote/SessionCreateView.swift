@@ -42,7 +42,17 @@ struct SessionCreateView: View {
     ///   nil = 普通模式（新建/编辑，显示「Save Session」）。
     var onConnect: ((ScrcpySessionModel) -> Void)? = nil
 
+    /// 点选直连时由首页传入：连接方式只列这些（「自动」永远在）—— 亮什么给什么。
+    /// nil = 全给（新建 / 编辑会话不受限）。
+    var allowedModes: Set<ConnectionMode>? = nil
+
     private var isQuickConnect: Bool { onConnect != nil }
+
+    /// 实际列出的连接方式。当前选择一定包含（防止预选值不在允许集里时 Picker 空白）。
+    private var visibleModes: [ConnectionMode] {
+        guard let allowed = allowedModes else { return ConnectionMode.allCases }
+        return ConnectionMode.allCases.filter { allowed.contains($0) || $0 == connMode }
+    }
     
     // Check if ADB is auto-selected based on input (not forced by user)
     private var isADBAutoSelected: Bool {
@@ -76,7 +86,7 @@ struct SessionCreateView: View {
         isEditMode = false
     }
 
-    init(sessionModel: ScrcpySessionModel, onConnect: ((ScrcpySessionModel) -> Void)? = nil) {
+    init(sessionModel: ScrcpySessionModel, onConnect: ((ScrcpySessionModel) -> Void)? = nil, allowedModes: Set<ConnectionMode>? = nil) {
         _sessionModel = State(initialValue: sessionModel)
         _hostInput = State(initialValue: sessionModel.host)
         _portInput = State(initialValue: sessionModel.port)
@@ -94,6 +104,7 @@ struct SessionCreateView: View {
         _startNewDisplay = State(initialValue: sessionModel.adbOptions.startNewDisplay)
         isEditMode = true
         self.onConnect = onConnect
+        self.allowedModes = allowedModes
     }
     
     var body: some View {
@@ -120,8 +131,9 @@ struct SessionCreateView: View {
                 Section(header: Text("Connection Options")) {
                     // ★ 连接方式（2026-10-09）：默认「自动」= 原来的三级逻辑；
                     //   用户也可以点名走某一条（点名的路不成功就明确失败，不偷偷换路）。
+                    //   ★ 点选直连时只列「四盏灯亮着的那些」+ 自动（用户定稿：亮什么给什么）。
                     Picker("连接方式", selection: $connMode.animation()) {
-                        ForEach(ConnectionMode.allCases, id: \.self) { mode in
+                        ForEach(visibleModes, id: \.self) { mode in
                             Text(mode.label).tag(mode)
                         }
                     }

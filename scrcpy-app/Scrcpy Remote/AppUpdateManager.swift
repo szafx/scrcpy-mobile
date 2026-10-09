@@ -11,8 +11,10 @@
 //    - latest.json                 （{"build","ipa","ipa_cn","date"}）
 //  App 的构建号（CFBundleVersion）由 CI 注入为「CI 运行号」，和 latest.json 的 build 字段一对比就知道有没有新版。
 //
-//  大陆网络对 GitHub 不稳，所以做了双通道：
-//    - 清单（latest.json）：先 GitHub，失败换家里镜像 https://home.szafx.icu:8898/
+//  大陆网络对 GitHub 不稳，所以做了三通道清单（2026-10-09 加第三条）：
+//    - 清单（latest.json）：家里镜像(https，需家里 v6) → tailnet 通道(内置 tsnet，
+//      走 IPv4/DERP，公司网无 v6 也能到；家里用 tailscale serve 暴露成明文 http)
+//      → GitHub
 //    - IPA 下载：优先探活家里镜像（快），不可达回退 GitHub
 //  家里镜像由家里那台机器定时从 Release 同步（见项目文档）。
 //
@@ -32,10 +34,13 @@ class AppUpdateManager: ObservableObject {
     static let shared = AppUpdateManager()
 
     // ★ 固定地址（CI 覆盖式更新，URL 永不变）
-    private static let manifestURLs: [URL] = [
-        URL(string: "https://home.szafx.icu:8898/latest.json")!,   // 家里镜像优先：局域网直连、且避开本网对 GitHub 的干扰
-        URL(string: "https://github.com/szafx/scrcpy-mobile/releases/download/latest-ipa/latest.json")!,
-    ]
+    /// 通道①：家里镜像（HTTPS，走家里公网 v6；在家最快）
+    private static let mirrorManifestURL = URL(string: "https://home.szafx.icu:8898/latest.json")!
+    /// 通道②：tailnet（内置 tsnet 直取；家里那台机器用 tailscale serve 把镜像
+    /// 暴露成 tailnet 内明文 HTTP —— 公司网无 v6 / 够不到 GitHub 时的活路）
+    private static let tailnetManifestURL = URL(string: "http://home.taildf1173.ts.net/latest.json")!
+    /// 通道③：GitHub Release（兜底）
+    private static let githubManifestURL = URL(string: "https://github.com/szafx/scrcpy-mobile/releases/download/latest-ipa/latest.json")!
     private static let installSchemePrefix = "apple-magnifier://install?url="
 
     private static let dismissedBuildKey = "AppUpdateManager.dismissedBuild"
@@ -70,7 +75,7 @@ class AppUpdateManager: ObservableObject {
         let last = UserDefaults.standard.double(forKey: Self.lastCheckAtKey)
         guard force || now - last >= Self.minCheckInterval else { return }
         UserDefaults.standard.set(now, forKey: Self.lastCheckAtKey)
-        fetchManifest(from: 0)
+        fetchManifest()
     }
 
     /// 用 TrollStore 的 scheme 直接装新版（TrollStore 会自己下载 IPA）。
@@ -139,27 +144,51 @@ class AppUpdateManager: ObservableObject {
         defaults.removeObject(forKey: Self.pendingIPACNKey)
     }
 
-    /// 依次尝试各个清单源（GitHub → 家里镜像）。
-    private func fetchManifest(from index: Int) {
-        guard index < Self.manifestURLs.count else {
-            print("🔄 [AppUpdate] 所有清单源都不可用")
-            return
+    /// 清单获取链：家里镜像(需 v6) → tailnet 通道(内置 tsnet) → GitHub。任一条成功即止。
+    private func fetchManifest() {
+        fetchManifestURL(Self.mirrorManifestURL) { [weak self] ok in
+            guard let self, !ok else { return }
+            self.fetchManifestViaTailnet { [weak self] ok in
+                guard let self, !ok else { return }
+                self.fetchManifestURL(Self.githubManifestURL) { _ in }
+            }
         }
-        var request = URLRequest(url: Self.manifestURLs[index])
+    }
+
+    /// 拉一个 HTTP(S) 清单源；拿到合法清单就 handle 并完成 true。
+    private func fetchManifestURL(_ url: URL, completion: @escaping (Bool) -> Void) {
+        var request = URLRequest(url: url)
         request.timeoutInterval = 15
         // Release 资源会被 CDN 缓存，不看缓存头可能拿到旧的清单
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 
         URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
-            guard let self else { return }
+            guard let self else { completion(false); return }
             guard let data, error == nil,
                   let manifest = try? JSONDecoder().decode(Manifest.self, from: data) else {
-                print("🔄 [AppUpdate] 清单源 \(index) 不可用（\(error?.localizedDescription ?? "解析失败")），试下一个")
-                self.fetchManifest(from: index + 1)
+                print("🔄 [AppUpdate] 清单源不可用（\(url.host ?? "?")：\(error?.localizedDescription ?? "解析失败")）")
+                completion(false)
                 return
             }
+            print("🔄 [AppUpdate] 清单源可用：\(url.host ?? "?")")
             self.handle(manifest)
+            completion(true)
         }.resume()
+    }
+
+    /// tailnet 通道：整个请求从内置 tsnet 的 netstack 发出（公司网无 v6 也能到家里）。
+    private func fetchManifestViaTailnet(completion: @escaping (Bool) -> Void) {
+        TailscaleManager.shared.httpGetViaTailnet(url: Self.tailnetManifestURL.absoluteString) { [weak self] data in
+            guard let self else { completion(false); return }
+            guard let data, let manifest = try? JSONDecoder().decode(Manifest.self, from: data) else {
+                print("🔄 [AppUpdate] tailnet 通道不可用（tsnet 没配置 / 没起来 / 取不到）")
+                completion(false)
+                return
+            }
+            print("🔄 [AppUpdate] tailnet 通道可用")
+            self.handle(manifest)
+            completion(true)
+        }
     }
 
     private func handle(_ manifest: Manifest) {

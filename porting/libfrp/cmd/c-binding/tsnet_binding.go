@@ -234,6 +234,18 @@ func tsnet_list_peers() *C.char {
 	return C.CString(string(b))
 }
 
+// tsnet_http_get 用内置 tsnet 的网络栈 GET 一个 URL（走 tailnet）。
+// 给「更新清单走 tailnet」用（公司网无 v6 时的兜底通道，见 TsnetHTTPGet 注释）。
+// 返回响应体字符串（失败返回空串）；由 Swift 侧 free。
+//
+//export tsnet_http_get
+func tsnet_http_get(url *C.char, timeoutSeconds C.int) *C.char {
+	if tsnetForwarder == nil {
+		return C.CString("")
+	}
+	return C.CString(tsnetForwarder.TsnetHTTPGet(C.GoString(url), int(timeoutSeconds)))
+}
+
 // tsnet_start_forward starts port forwarding
 //
 //export tsnet_start_forward

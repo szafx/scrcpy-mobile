@@ -36,8 +36,9 @@ struct DevicesView: View {
     /// 设置 sheet 里显示哪一页：quickConnect = 点选直连的「连接设置」（临时、不落盘）；
     /// createSession = 新建会话。nil 时 sheet 不显示。
     /// ★ 扫到的列表已并入首页，sheet 只用来承载设置页本身。
+    /// quickConnect 第二个值 = 这台设备**亮着灯的连接方式**（+自动），设置页只列这些。
     private enum ScanSheetMode {
-        case quickConnect(ScrcpySessionModel)
+        case quickConnect(ScrcpySessionModel, Set<ConnectionMode>)
         case createSession
     }
 
@@ -90,11 +91,11 @@ struct DevicesView: View {
             scanSheetMode = nil
         }) {
             switch scanSheetMode {
-            case .quickConnect(let model):
+            case .quickConnect(let model, let allowed):
                 SessionCreateView(sessionModel: model, onConnect: { m in
                     isScanSheetShown = false
                     onConnectSession(ScrcpySession(sessionModel: m))
-                })
+                }, allowedModes: allowed)
                 .environmentObject(appSettings)
 
             case .createSession:
@@ -386,28 +387,40 @@ struct DevicesView: View {
     private func openQuickConnect(for row: HomeRow) {
         guard let dev = row.discovered else { return }
         var model = ScrcpySessionModel()
-        if let lan = dev.lanHost {
-            model.host = lan
+
+        // ★ 亮什么给什么（用户定稿 2026-10-09）：连接方式只列「灯亮着的那几条」+ 自动。
+        //   自动也按灯配置自己 —— 比如 TS 灯不亮就不试 Tailscale，直接跳过。
+        var allowed: Set<ConnectionMode> = [.auto]
+        if dev.canLan { allowed.insert(.lan) }
+        if dev.relayReachable { allowed.insert(.homeRelay); allowed.insert(.frpP2P) }
+        let tsUsable = dev.tailnetOnline && dev.tailnetHost != nil
+        if tsUsable { allowed.insert(.tailscale) }
+
+        model.useFrp = dev.canFrp
+        model.useTailscale = tsUsable
+        if tsUsable, let tsHost = dev.tailnetHost {
+            // TS 亮：自动的隧道兜底拨 100.x（局域网那一级本来就会自己认设备，不靠 Host）
+            model.host = tsHost
         } else if dev.canFrp {
             model.host = FrpSettings.load().serverAddr
-        } else if let tsHost = dev.tailnetHost {
-            // ★ 只有 tailnet 这条路（如公司网无 IPv6）：预填 100.x + 连接方式直接选
-            //   「Tailscale」—— 否则会预填够不到的家宽域名，点了也连不上。
-            model.host = tsHost
-            model.connectionMode = ConnectionMode.tailscale.rawValue
-            model.useTailscale = true
+        } else if let lan = dev.lanHost {
+            model.host = lan
         } else {
             model.host = FrpSettings.load().serverAddr
         }
+        // 只有 tailnet 一条路（如公司网无 v6）：连接方式直接预选 Tailscale，
+        // 否则会预填够不到的家宽域名，点了也连不上。
+        if !dev.canLan && !dev.canFrp && tsUsable {
+            model.connectionMode = ConnectionMode.tailscale.rawValue
+        }
         model.port = "5555"
         model.sessionName = discovery.name(for: dev)
-        model.useFrp = dev.canFrp
         model.frpProxyName = dev.frpProxyName ?? "phone-\(dev.model)-\(dev.suffix)"
         // 发现到的中转端口直接预填 —— 进设置页选「家里 IPv6 中转」就不用再手敲
         if let rp = dev.relayPort { model.frpRemotePort = String(rp) }
         model.adbOptions.turnScreenOff = quickTurnScreenOff
         // ★ 就地弹设置页（不关不开 —— 同 tick 二次 present 会被 UIKit 吞，见交接-2026-10-09）
-        scanSheetMode = .quickConnect(model)
+        scanSheetMode = .quickConnect(model, allowed)
         isScanSheetShown = true
     }
 }

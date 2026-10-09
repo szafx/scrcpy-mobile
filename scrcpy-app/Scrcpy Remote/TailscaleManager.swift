@@ -654,7 +654,6 @@ class TailscaleManager {
         let ip: String         // tailnet IPv4（100.x）
         let online: Bool       // netmap 在线标记
     }
-
     /// 列出 tailnet 里的全部节点（不含自己）。本端 tsnet 没起 / 还没登录 → 空数组。
     ///
     /// ★ 首页设备列表的第三个发现源：netmap 由控制面推来、走 IPv4/DERP，
@@ -678,6 +677,52 @@ class TailscaleManager {
                 ip: obj["ip"] as? String ?? "",
                 online: obj["online"] as? Bool ?? false
             )
+        }
+    }
+
+    /// 走内置 tsnet GET 一个 URL（整个请求从 netstack 发出，Host = MagicDNS 全名）。
+    ///
+    /// ★ 更新清单的 tailnet 通道（2026-10-09）：公司网（无 v6）既够不到家里镜像、
+    /// 又可能够不到 GitHub —— tailnet（IPv4/DERP）是唯一永远能到家里的路。
+    /// 家里那台机器用 `tailscale serve --bg --http=80 https+insecure://localhost:8898`
+    /// 把镜像暴露成 http://home.taildf1173.ts.net/（tailnet 内明文 HTTP，传输有
+    /// WireGuard 加密，且不对外网开放）。
+    ///
+    /// 为什么不用 startForward + 本机 URLSession：serve 按 Host 头路由，转发的请求
+    /// Host 是 127.0.0.1:port 会被 404；tsnet 的 HTTPClient 整个请求从 netstack 发出，
+    /// Host 就是 MagicDNS 全名，路由正确。
+    ///
+    /// 本端 tsnet 没起会先幂等拉起并等它就绪（最多 ~10 秒）；没配置/等不到 → nil。
+    /// completion 在后台队列回调。
+    func httpGetViaTailnet(url: String, timeoutSeconds: Int = 12, completion: @escaping (Data?) -> Void) {
+        guard isConfigurationValid() else { completion(nil); return }
+        // ensureConnected 在 main 上做（它碰 Timer/UI 相关的路径有 main 跳转逻辑）
+        DispatchQueue.main.async {
+            _ = TailscaleManager.shared.ensureConnected()
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { completion(nil); return }
+            if !self.isStarted() {
+                // 冷启动要几秒；登录慢就等满 10 秒后放弃（本轮按通道不可用处理）
+                let deadline = Date().addingTimeInterval(10)
+                while !self.isStarted() && Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.5)
+                }
+            }
+            guard self.isStarted() else {
+                print("[TailscaleManager] tailnet GET：tsnet 未就绪，放弃")
+                completion(nil)
+                return
+            }
+            guard let ptr = url.withCString({
+                tsnet_http_get(UnsafeMutablePointer(mutating: $0), Int32(timeoutSeconds))
+            }) else {
+                completion(nil)
+                return
+            }
+            let body = String(cString: ptr)
+            free(ptr)
+            completion(body.isEmpty ? nil : body.data(using: .utf8))
         }
     }
     
