@@ -28,7 +28,9 @@ enum ConnectionKind: Equatable {
     case frpP2P         // frp XTCP 打洞成功，P2P 直连
     case frpRelay       // frp 没打通，经 frps 中转
     case homeRelay      // 手选「家里 IPv6 中转」：直连 frps 的中转口（纯 TCP）
-    case tailscale      // 内置 tsnet
+    case tsDirect       // Tailscale 直连（打洞成功）
+    case tsRelay        // Tailscale 走 DERP 中继
+    case tailscale      // Tailscale（路径查不到时的兜底）
     case direct         // 其它直连（公网地址等）
     case unknown
 
@@ -38,6 +40,8 @@ enum ConnectionKind: Equatable {
         case .frpP2P:    return "frp P2P"
         case .frpRelay:  return "frp 中转"
         case .homeRelay: return "IPv6 中转"
+        case .tsDirect:  return "Tailscale 直连"
+        case .tsRelay:   return "Tailscale 中转"
         case .tailscale: return "Tailscale"
         case .direct:    return "直连"
         case .unknown:   return "未知"
@@ -49,11 +53,13 @@ enum ConnectionKind: Equatable {
         switch self {
         case .lan:       return 0
         case .frpP2P:    return 1
-        case .tailscale: return 2
+        case .tsDirect:  return 2
         case .homeRelay: return 3
-        case .frpRelay:  return 4
-        case .direct:    return 5
-        case .unknown:   return 6
+        case .tailscale: return 4
+        case .frpRelay:  return 5
+        case .tsRelay:   return 6
+        case .direct:    return 7
+        case .unknown:   return 8
         }
     }
 }
@@ -169,7 +175,20 @@ final class LatencyMonitor: ObservableObject {
             return
         }
         if manager.isUsingTailscale {
-            kind = .tailscale
+            // 路径细分（用户点名）：TS 连接也可以判「直连还是 DERP 中转」——
+            // 问一次本节点状态，看这条 peer 的 CurAddr/Relay（见 tsnet_peer_path）。
+            if let target = manager.currentSession?.hostReal,
+               let path = TailscaleManager.shared.peerPath(host: target) {
+                if path.hasPrefix("direct") {
+                    kind = .tsDirect
+                } else if path.hasPrefix("derp") || path.hasPrefix("peer-relay") {
+                    kind = .tsRelay
+                } else {
+                    kind = .tailscale
+                }
+            } else {
+                kind = .tailscale
+            }
             return
         }
         // 手选「家里 IPv6 中转」：host 是 frps 域名、走纯 TCP —— 单列一类

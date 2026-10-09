@@ -623,6 +623,26 @@ class TailscaleManager {
         guard let dot = full.firstIndex(of: ".") else { return nil }
         return String(full[full.index(after: dot)...])
     }
+
+    /// 查一条 peer 当前**实际走的路径**："direct ip:port" / "derp 区域" / nil（查不到）。
+    /// 气泡用它把 Tailscale 连接细分成「直连 / 中转」（和 frp 的 P2P/中转 同款展示）。
+    /// 5 秒节流：底层要问一次本节点状态，别每个延迟采样都问。
+    private var peerPathCache: (at: Date, host: String, value: String?)?
+
+    func peerPath(host: String) -> String? {
+        guard isStarted() else { return nil }
+        if let c = peerPathCache, c.host == host, Date().timeIntervalSince(c.at) < 5 {
+            return c.value
+        }
+        var value: String? = nil
+        if let ptr = host.withCString({ tsnet_peer_path(UnsafeMutablePointer(mutating: $0)) }) {
+            let s = String(cString: ptr)
+            free(ptr)
+            value = s.isEmpty ? nil : s
+        }
+        peerPathCache = (Date(), host, value)
+        return value
+    }
     
     /// Get all available Tailscale IP addresses
     /// - Returns: Comma-separated list of IP addresses, or nil if not available

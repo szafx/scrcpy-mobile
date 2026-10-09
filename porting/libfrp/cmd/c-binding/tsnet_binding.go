@@ -202,6 +202,17 @@ func tsnet_probe(addr *C.char, port C.int, timeoutMs C.int) C.int {
 	return 0
 }
 
+// tsnet_peer_path 查一条 peer 当前实际走的路径（"direct ..." / "derp ..." / ""）
+// 给气泡标「Tailscale 直连 / 中转」用。返回的字符串由 Swift 侧 free。
+//
+//export tsnet_peer_path
+func tsnet_peer_path(host *C.char) *C.char {
+	if tsnetForwarder == nil {
+		return C.CString("")
+	}
+	return C.CString(tsnetForwarder.TsnetPeerPath(C.GoString(host)))
+}
+
 // tsnet_start_forward starts port forwarding
 //
 //export tsnet_start_forward

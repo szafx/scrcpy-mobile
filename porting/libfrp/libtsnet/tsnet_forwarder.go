@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -254,6 +255,72 @@ func (f *TSNetForwarder) TsnetProbe(remoteAddr string, remotePort int, timeoutMs
 	}
 	conn.Close()
 	return nil
+}
+
+// TsnetPeerPath 查一条 peer 当前**实际走的路径**（给气泡标「直连 / 中转」）：
+//
+//	"direct ip:port"     —— 打洞成功，走直连
+//	"derp <region>"      —— 走 DERP 中继
+//	"peer-relay ..."     —— 走 peer relay
+//	""                   —— 查不到（没连/没这个节点）
+//
+// host 支持 MagicDNS 全名（可带尾点）、短名、HostName、或 100.x 地址。
+func (f *TSNetForwarder) TsnetPeerPath(host string) string {
+	f.mutex.RLock()
+	srv := f.server
+	f.mutex.RUnlock()
+	if srv == nil {
+		return ""
+	}
+	lc, err := srv.LocalClient()
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	st, err := lc.Status(ctx)
+	if err != nil {
+		return ""
+	}
+
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, p := range st.Peer {
+		dns := strings.ToLower(strings.TrimSuffix(p.DNSName, "."))
+		match := false
+		if dns != "" {
+			if dns == h {
+				match = true
+			} else if i := strings.IndexByte(dns, '.'); i > 0 && dns[:i] == h {
+				match = true
+			}
+		}
+		if !match && p.HostName != "" && strings.EqualFold(p.HostName, h) {
+			match = true
+		}
+		if !match {
+			for _, ip := range p.TailscaleIPs {
+				if ip.String() == h {
+					match = true
+					break
+				}
+			}
+		}
+		if !match {
+			continue
+		}
+
+		if p.CurAddr != "" {
+			return "direct " + p.CurAddr
+		}
+		if p.Relay != "" {
+			return "derp " + p.Relay
+		}
+		if p.PeerRelay != "" {
+			return "peer-relay " + p.PeerRelay
+		}
+		return "unknown"
+	}
+	return ""
 }
 
 func (f *TSNetForwarder) TsnetStartForward(remoteAddr string, remotePort int, localPort int) error {
