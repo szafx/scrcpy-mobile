@@ -73,11 +73,14 @@ struct DevicesView: View {
         // 下拉 = 全量重扫（含 253 地址大扫描；平时是 8 秒一轮的轻量刷新）
         .refreshable { await discovery.run() }
         .task {
-            // 进页面全量发现一次（走共享扫描缓存，通常很快），
-            // 之后每 8 秒轻量刷新（frps 名单 + tailnet 探针 + 已知地址存活）。
+            // 进页面全量发现一次（走共享扫描缓存 + Bonjour 快路径，通常很快），
+            // 之后每 8 秒轻量刷新（frps 名单 + 中转口实测 + tailnet 探针 + 已知地址存活）。
             await discovery.run()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
+                // ★ 远程控制中（有活跃会话）→ 整个轮询挂起：
+                //   正在投屏时没必要一边看画面一边扫状态灯 —— 省电、省流量、少碰设备侧连接。
+                if SessionConnectionManager.shared.currentSession != nil { continue }
                 await discovery.refreshLightweight()
             }
         }
