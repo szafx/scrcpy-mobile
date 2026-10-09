@@ -75,12 +75,14 @@ struct DevicesView: View {
         .task {
             // 进页面全量发现一次（走共享扫描缓存 + Bonjour 快路径，通常很快），
             // 之后每 8 秒轻量刷新（frps 名单 + 中转口实测 + tailnet 探针 + 已知地址存活）。
+            discovery.extraProxyNames = savedProxyNames
             await discovery.run()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 // ★ 远程控制中（有活跃会话）→ 整个轮询挂起：
                 //   正在投屏时没必要一边看画面一边扫状态灯 —— 省电、省流量、少碰设备侧连接。
                 if SessionConnectionManager.shared.currentSession != nil { continue }
+                discovery.extraProxyNames = savedProxyNames
                 await discovery.refreshLightweight()
             }
         }
@@ -197,10 +199,17 @@ struct DevicesView: View {
                     .disabled(adminUser.isEmpty || adminPass.isEmpty)
                 }
             } else if let e = discovery.frpError, e != "frps not configured" {
-                Text(LocalizedStringKey("frpc 名单不可用：\(e)"))
-                    .font(.footnote)
-                    .foregroundColor(Theme.secondaryText)
-                    .lineLimit(1)
+                if e == "frps admin unreachable" {
+                    Text("到不了家里 frps（当前网络可能没有 IPv6）—— 打洞/中转不可用；Tailscale 不受影响")
+                        .font(.footnote)
+                        .foregroundColor(Theme.secondaryText)
+                        .lineLimit(2)
+                } else {
+                    Text(LocalizedStringKey("frpc 名单不可用：\(e)"))
+                        .font(.footnote)
+                        .foregroundColor(Theme.secondaryText)
+                        .lineLimit(1)
+                }
             }
         }
     }
@@ -289,7 +298,8 @@ struct DevicesView: View {
                 lanOn: match?.canLan ?? false,
                 relayOn: match?.relayReachable ?? false,
                 p2pOn: match?.relayReachable ?? false,
-                tsOn: match?.tailnetOnline ?? false,
+                // TS 灯不依赖 frps 名单：发现列表里没有这台时，用已保存会话的身份直接查探针结果
+                tsOn: match?.tailnetOnline ?? discovery.sessionTailnetOnline[m.frpProxyName.lowercased()] ?? false,
                 session: session,
                 discovered: match
             ))
@@ -312,6 +322,11 @@ struct DevicesView: View {
             ))
         }
         return rows
+    }
+
+    /// 已保存会话的设备身份（TS 探测候选的补充来源）
+    private var savedProxyNames: [String] {
+        savedSessions.map { $0.sessionModel.frpProxyName }.filter { !$0.isEmpty }
     }
 
     /// 发现设备的副标题：局域网地址 > frpc 在线 > 离线

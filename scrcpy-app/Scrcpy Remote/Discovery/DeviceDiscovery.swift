@@ -280,7 +280,15 @@ final class DeviceDiscovery: ObservableObject {
         }
     }
 
-    /// 对 frpc 在线的设备探一遍 tailnet（首页 TS 灯）。
+    /// 视图喂进来的额外设备身份（已保存会话的 proxy 名）——
+    /// TS 探测的候选集 = 发现列表 ∪ 这个。**不依赖 frps 名单**：
+    /// 公司网等够不到家里 v6 的场景 frps 必空，但 tailnet（走 IPv4/DERP）照样能用。
+    var extraProxyNames: [String] = []
+
+    /// tailnet 探针结果（按 proxy 名小写存）——「已保存会话」行取灯用
+    @Published private(set) var sessionTailnetOnline: [String: Bool] = [:]
+
+    /// 对候选设备探一遍 tailnet（首页 TS 灯）。
     ///
     /// 判据（用户定稿）：**只看被控端在不在线** —— 被控端 = FrpcApp（或脚本版）里内置的
     /// relay tsnet，名字约定：proxy 名全小写（TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
@@ -308,34 +316,47 @@ final class DeviceDiscovery: ObservableObject {
             return
         }
 
-        let targets: [(Int, String)] = devices.enumerated().compactMap { (idx, dev) in
-            guard let proxy = dev.frpProxyName else { return nil }
-            return (idx, "\(proxy.lowercased()).\(suffix)")
+        // 候选 = 发现设备 ∪ 已保存会话的身份（去重，统一小写）
+        var candidateNames = Set<String>()
+        for dev in devices {
+            if let p = dev.frpProxyName, !p.isEmpty { candidateNames.insert(p.lowercased()) }
         }
-        guard !targets.isEmpty else { return }
+        for p in extraProxyNames {
+            let t = p.trimmingCharacters(in: .whitespaces).lowercased()
+            if !t.isEmpty { candidateNames.insert(t) }
+        }
+        guard !candidateNames.isEmpty else { return }
 
-        let results = await withTaskGroup(of: (Int, Bool).self) { group -> [(Int, Bool)] in
-            for (idx, fqdn) in targets {
+        let names = Array(candidateNames)
+        let results = await withTaskGroup(of: (String, Bool).self) { group -> [(String, Bool)] in
+            for name in names {
                 group.addTask {
                     let ok = await withCheckedContinuation { cont in
                         DispatchQueue.global(qos: .utility).async {
-                            cont.resume(returning: TailscaleManager.shared.probe(host: fqdn))
+                            cont.resume(returning: TailscaleManager.shared.probe(host: "\(name).\(suffix)"))
                         }
                     }
-                    return (idx, ok)
+                    return (name, ok)
                 }
             }
-            var out: [(Int, Bool)] = []
+            var out: [(String, Bool)] = []
             for await r in group { out.append(r) }
             return out
         }
 
+        var onlineByName: [String: Bool] = [:]
         var hits = 0
-        for (idx, ok) in results where idx < devices.count {
-            devices[idx].tailnetOnline = ok
+        for (name, ok) in results {
+            onlineByName[name] = ok
             if ok { hits += 1 }
         }
-        print("[DeviceDiscovery] TS 探针：\(targets.count) 台，在线 \(hits) 台")
+        sessionTailnetOnline = onlineByName
+        for i in devices.indices {
+            if let p = devices[i].frpProxyName, let ok = onlineByName[p.lowercased()] {
+                devices[i].tailnetOnline = ok
+            }
+        }
+        print("[DeviceDiscovery] TS 探针：\(names.count) 台，在线 \(hits) 台")
     }
 
     // MARK: - 合并
