@@ -119,6 +119,32 @@ class SessionNetworking {
     /// - Parameter session: The session configuration
     /// - Returns: NetworkConnectionInfo with resolved connection details, or nil if setup failed
     func getConnectionInfo(for session: ScrcpySessionModel) async -> NetworkConnectionInfo? {
+        // ★ 2026-10-09：用户手选连接方式。点名的四种各走各的、**互不回落**；
+        //   空 = 自动 = 原来的「局域网 → 隧道」三级逻辑（老会话行为不变）。
+        switch session.connectionModeEnum {
+        case .lan:
+            return await setupLanOnlyConnection(session: session)
+        case .homeRelay:
+            return await setupHomeRelayConnection(session: session)
+        case .frpP2P:
+            // 点名走 frp：跳过局域网探测，直接建 visitor
+            // （frp 内部打洞失败会自行退中转 —— 那是 frp 自己的事，这里不拦）
+            lastAttemptWasLAN = false
+            return await setupFrpConnection(session: session)
+        case .tailscale:
+            lastAttemptWasLAN = false
+            return await setupTailscaleConnection(
+                sessionId: session.id,
+                remoteHost: session.hostReal,
+                remotePort: Int(session.port) ?? 0
+            )
+        case .auto:
+            return await autoSelectConnection(session: session)
+        }
+    }
+
+    /// 自动模式：局域网优先 → frp → Tailscale（原三级逻辑，行为与旧版完全一致）。
+    private func autoSelectConnection(for session: ScrcpySessionModel) async -> NetworkConnectionInfo? {
         let originalHost = session.hostReal
         let originalPort = session.port
 
@@ -183,6 +209,90 @@ class SessionNetworking {
             remoteHost: originalHost,
             remotePort: Int(originalPort) ?? 0
         )
+    }
+
+    // MARK: - 手选模式：仅局域网
+
+    /// 只走局域网：手填的是内网地址就直接连；否则按设备身份（frp proxy 名后缀）
+    /// 在局域网里找。**找不到就明确失败，不回落任何隧道**（用户点名要的就是这个）。
+    private func setupLanOnlyConnection(session: ScrcpySessionModel) async -> NetworkConnectionInfo? {
+        lastAttemptWasLAN = true
+
+        if Self.isPrivateAddress(session.hostReal) {
+            print("[SessionNetworking] [仅局域网] 直连手填的内网地址 \(session.hostReal):\(session.port)")
+            return NetworkConnectionInfo(
+                host: session.hostReal,
+                port: session.port,
+                isUsingTailscale: false,
+                isUsingFrp: false,
+                originalHost: session.hostReal,
+                originalPort: session.port,
+                localForwardPort: nil
+            )
+        }
+
+        statusUpdateCallback?("正在局域网里找这台设备…")
+        if let lanHost = await findLanHost(portText: session.port, session: session) {
+            print("[SessionNetworking] [仅局域网] 找到 \(lanHost):\(session.port)")
+            statusUpdateCallback?("已找到局域网设备，正在直连…")
+            return NetworkConnectionInfo(
+                host: lanHost,
+                port: session.port,
+                isUsingTailscale: false,
+                isUsingFrp: false,
+                originalHost: lanHost,
+                originalPort: session.port,
+                localForwardPort: nil
+            )
+        }
+
+        print("[SessionNetworking] [仅局域网] 没找到（不在同一 WiFi / 认不出设备身份）")
+        statusUpdateCallback?("局域网里没找到这台设备（要在同一 WiFi；或填它当前的内网 IP）")
+        return nil
+    }
+
+    // MARK: - 手选模式：家里 IPv6 中转
+
+    /// 只走「家里 IPv6 中转」：直连 frps 的中转口（该手机 -tcp proxy 的 remotePort）。
+    ///
+    /// 这条是**纯 TCP、不经过打洞**的路 —— 网络抖动时比 P2P 耐扛
+    /// （2026-10-09 实测：蜂窝连荣耀 Play 稳定 45~90ms）。走不通就明确失败，不回落。
+    private func setupHomeRelayConnection(session: ScrcpySessionModel) async -> NetworkConnectionInfo? {
+        let settings = FrpSettings.load()
+        guard settings.isConfigured, !settings.serverAddr.isEmpty else {
+            print("[SessionNetworking] [IPv6 中转] frp 服务器地址没配置")
+            statusUpdateCallback?("没配 frp 服务器地址（设置 → frp Tunnel）")
+            return nil
+        }
+
+        let portText = session.frpRemotePort.trimmingCharacters(in: .whitespaces)
+        guard let portNumber = Int(portText), (6000...6099).contains(portNumber) else {
+            print("[SessionNetworking] [IPv6 中转] 中转端口缺失或非法：'\(portText)'")
+            statusUpdateCallback?("请填这台手机的中转端口（6000~6099）")
+            return nil
+        }
+
+        print("[SessionNetworking] [IPv6 中转] 直连 \(settings.serverAddr):\(portNumber)")
+        statusUpdateCallback?("正在经家里中转直连（IPv6）…")
+        return NetworkConnectionInfo(
+            host: settings.serverAddr,
+            port: String(portNumber),
+            isUsingTailscale: false,
+            isUsingFrp: false,
+            originalHost: settings.serverAddr,
+            originalPort: String(portNumber),
+            localForwardPort: nil
+        )
+    }
+
+    /// 看起来是不是内网地址（192.168.x / 10.x / 172.16~31.x）—— 「仅局域网」模式用它判断手填的是不是内网 IP。
+    static func isPrivateAddress(_ host: String) -> Bool {
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return false }
+        if parts[0] == 192 && parts[1] == 168 { return true }
+        if parts[0] == 10 { return true }
+        if parts[0] == 172 && (16...31).contains(parts[1]) { return true }
+        return false
     }
     
     /// Stop port forwarding for a specific session

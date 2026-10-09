@@ -2,11 +2,19 @@
 //  DevicesView.swift
 //  Scrcpy Remote
 //
-//  第一个 Tab：设备列表。对应 VRLink 截图 `shots/00.jpg` 的 Devices 页。
+//  第一个 Tab：设备首页（2026-10-09 重做）。
 //
-//  数据仍然来自 `SessionManager`（Keychain 里的 [ScrcpySessionModel]），
-//  连接仍然走 `SessionConnectionManager.connectToSession` —— 这一页只换了皮，
-//  没有自己的一套状态。
+//  新版设计（用户定的）：
+//    · **扫描进首页** —— 不再有「Scan LAN」按钮和扫描 sheet；页面自己定时跑发现。
+//    · **统一列表** —— 「扫描到过的 + 已保存的」全部列在一起（同一台合并成一行）。
+//    · **四路状态灯** —— 每行下面四个小灯：局域网 / 中转 / 打洞 / TS，
+//      绿 = 当前这条能走通，灰 = 走不通；全都灰也照常显示（离线设备不消失）。
+//    · 实时刷新分两层（见 DeviceDiscovery）：
+//        - frps 名单 + tailnet 探针 + 已知地址存活：8 秒一轮（便宜）
+//        - 全子网扫描：只在进页面 / 下拉刷新时跑（耗电且会弄脏 adb 设备表）
+//
+//  设置页复用：点「没保存过的设备」→ 弹「连接设置」（临时会话，不落盘，
+//  见 SessionCreateView.onConnect 与 SessionSheet 的说明）。
 //
 
 import SwiftUI
@@ -25,62 +33,36 @@ struct DevicesView: View {
 
     @EnvironmentObject var appSettings: AppSettings
 
-    /// ★ 扫描 sheet 里当前显示哪一页：nil = 扫描列表；quickConnect = 就地切到「连接设置」
-    ///   （预填、不落盘）；createSession = 就地切到「新建会话」。
-    ///
-    ///   **为什么是「就地换内容」而不是「关掉扫描页、再另开一个 sheet」**：
-    ///   2026-10-08 frida 实录 —— 点设备时「关扫描页 + 开设置页」发生在同一个 tick，
-    ///   新 sheet 的 present 请求发出后被 UIKit 直接吞掉（关的动画还在飞），
-    ///   界面栈最终为空，表现为「点设备毫无反应 / 点了不连」。
-    ///   同一个 sheet 里换内容则完全不涉及第二次 present，机制上根除。
+    /// 设置 sheet 里显示哪一页：quickConnect = 点选直连的「连接设置」（临时、不落盘）；
+    /// createSession = 新建会话。nil 时 sheet 不显示。
+    /// ★ 扫到的列表已并入首页，sheet 只用来承载设置页本身。
     private enum ScanSheetMode {
         case quickConnect(ScrcpySessionModel)
         case createSession
     }
 
-    @State private var isLanScanPresented = false
+    @State private var isScanSheetShown = false
     @State private var scanSheetMode: ScanSheetMode? = nil
     @State private var sessionPendingDeletion: ScrcpySession?
     @State private var showDeleteConfirm = false
+    @State private var renameTarget: DiscoveredDevice? = nil
+    @State private var renameText = ""
+    @State private var adminUser = ""
+    @State private var adminPass = ""
 
-    // ★ 「发现设备」点选直连（临时会话）的屏幕选项：连接后是否关闭对方屏幕。
-    //   默认 **关**（被控端保持亮屏）—— 电视/临时看一眼时最不意外；
-    //   要省电（批量手机）在扫描页里打开一次即记住（同一个 key）。
+    @StateObject private var discovery = DeviceDiscovery()
+
+    // ★ 「点选直连」临时会话的屏幕选项：连接后是否关闭对方屏幕。
+    //   默认 **关**（被控端保持亮屏）；要省电在首页开关里打开一次即记住。
     @AppStorage("quickConnect.turnScreenOff") private var quickTurnScreenOff = false
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-
-                HStack {
-                    Text("Devices")
-                        .font(.system(size: 32, weight: .bold))
-                    Spacer()
-                    CircleIconButton(icon: "plus", action: onCreateSession)
-                }
-
-                HeroCard(
-                    icon: "wifi",
-                    title: "Scrcpy Remote",
-                    subtitle: "Control your Android devices over Wi-Fi, the frp tunnel, or Tailscale — no desktop required."
-                )
-
+            VStack(alignment: .leading, spacing: 16) {
+                header
                 quickEntries
-
-                if savedSessions.isEmpty {
-                    EmptyStateView(
-                        icon: "rectangle.stack.badge.plus",
-                        title: "No devices yet",
-                        message: "Tap + to add a device: pairing code, LAN scan, or manual IP / port."
-                    ) {
-                        PrimaryButton(title: "Scan LAN", icon: "dot.radiowaves.left.and.right") {
-                            isLanScanPresented = true
-                        }
-                        .padding(.horizontal, 32)
-                    }
-                } else {
-                    deviceList
-                }
+                discoveryBar
+                deviceList
             }
             .padding(.horizontal, Theme.pagePadding)
             .padding(.top, 8)
@@ -88,16 +70,24 @@ struct DevicesView: View {
         }
         .background(Theme.background.ignoresSafeArea())
         .navigationBarHidden(true)
-        .sheet(isPresented: $isLanScanPresented, onDismiss: {
-            scanSheetMode = nil   // 关了复位，下次打开从扫描列表开始
+        // 下拉 = 全量重扫（含 253 地址大扫描；平时是 8 秒一轮的轻量刷新）
+        .refreshable { await discovery.run() }
+        .task {
+            // 进页面全量发现一次（走共享扫描缓存，通常很快），
+            // 之后每 8 秒轻量刷新（frps 名单 + tailnet 探针 + 已知地址存活）。
+            await discovery.run()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                await discovery.refreshLightweight()
+            }
+        }
+        .sheet(isPresented: $isScanSheetShown, onDismiss: {
+            scanSheetMode = nil
         }) {
             switch scanSheetMode {
             case .quickConnect(let model):
-                // 点选直连：和普通会话同款的「连接设置」页（预填），
-                // 画质/帧数/码率/音频/熄屏……全部可调，点「连接」即连、不落盘
-                //（保存入口在该模式下隐藏，见 SessionCreateView.isQuickConnect）。
                 SessionCreateView(sessionModel: model, onConnect: { m in
-                    isLanScanPresented = false
+                    isScanSheetShown = false
                     onConnectSession(ScrcpySession(sessionModel: m))
                 })
                 .environmentObject(appSettings)
@@ -107,32 +97,7 @@ struct DevicesView: View {
                     .environmentObject(appSettings)
 
             case nil:
-                LanScanSheet(
-                    onConnect: { device, name in
-                        // ★ 点列表即进「连接设置」：构造一个**临时会话**（不落盘）。
-                        //   · sessionName 用用户起的名字（没起过就用「型号 · 后4位」）
-                        //   · frpProxyName 必填 —— 它既是 frp visitor 的 proxy 名，
-                        //     也是局域网匹配的「设备身份」（后缀 = 序列号后4位）
-                        //   · useFrp 只有「这台挂着 frpc」才开；连接时依旧走既有的
-                        //     三级选路：局域网能匹配上就走局域网 → frp(P2P) → 中转
-                        var model = ScrcpySessionModel()
-                        model.host = device.lanHost ?? FrpSettings.load().serverAddr
-                        model.port = "5555"
-                        model.sessionName = name
-                        model.useFrp = device.canFrp
-                        model.frpProxyName = device.frpProxyName ?? "phone-\(device.model)-\(device.suffix)"
-                        // 临时会话的屏幕选项：默认保持亮屏（见 quickTurnScreenOff 的说明），
-                        // 开关在扫描页顶部，改一次即记住；进「连接设置」页后还能改全部参数。
-                        model.adbOptions.turnScreenOff = quickTurnScreenOff
-                        // ★ 就地切页 —— 不关 sheet（见 ScanSheetMode 的说明）
-                        scanSheetMode = .quickConnect(model)
-                    },
-                    onManual: {
-                        // 手动建会话同样就地切页：原先「关扫描页 → 由上层另开新建页」
-                        // 是同款「同 tick 二次 present」，一样会被系统吞。
-                        scanSheetMode = .createSession
-                    }
-                )
+                EmptyView()
             }
         }
         .alert(isPresented: $showDeleteConfirm) {
@@ -146,23 +111,43 @@ struct DevicesView: View {
                 secondaryButton: .cancel { sessionPendingDeletion = nil }
             )
         }
+        .alert("重命名设备", isPresented: Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } }
+        )) {
+            TextField("设备名", text: $renameText)
+            Button("保存") {
+                if let target = renameTarget {
+                    discovery.rename(target, to: renameText)
+                }
+                renameTarget = nil
+            }
+            Button("取消", role: .cancel) { renameTarget = nil }
+        } message: {
+            Text("按「型号 + 序列号后4位」记住这台设备。留空 = 恢复默认名。")
+        }
     }
 
-    // MARK: - 三个快捷入口
+    // MARK: - 头部
+
+    private var header: some View {
+        HStack {
+            Text("Devices")
+                .font(.system(size: 32, weight: .bold))
+            Spacer()
+            CircleIconButton(icon: "plus", action: onCreateSession)
+        }
+    }
+
+    // MARK: - 快捷入口（Scan LAN 已并入首页，不再单独给按钮）
 
     private var quickEntries: some View {
         HStack(spacing: 10) {
-            // ADBPairingView 自己不带导航标题（它本来挂在 SettingsView 的 NavigationLink 下），
-            // 这里推它进去时补一个 —— 顺带保证它一定有导航栏和返回按钮。
             NavigationLink(destination: ADBPairingView()
                 .navigationBarTitle("Pair with code", displayMode: .inline)) {
                 QuickEntryLabel(icon: "number.square", title: "Pair with code")
             }
             .buttonStyle(.plain)
-
-            QuickEntryButton(icon: "dot.radiowaves.left.and.right", title: "Scan LAN") {
-                isLanScanPresented = true
-            }
 
             QuickEntryButton(icon: "keyboard", title: "Manual") {
                 onCreateSession()
@@ -170,38 +155,171 @@ struct DevicesView: View {
         }
     }
 
-    // MARK: - 设备列表
+    // MARK: - 扫描状态条（阶段提示 + 熄屏开关 + frps 账户回退）
+
+    private var discoveryBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if discovery.running {
+                    ProgressView().scaleEffect(0.7)
+                }
+                Text(discovery.running
+                     ? LocalizedStringKey(discovery.phase.isEmpty ? "Scanning…" : discovery.phase)
+                     : LocalizedStringKey(discovery.phase.isEmpty ? "下拉可重新扫描" : discovery.phase))
+                    .font(.footnote)
+                    .foregroundColor(Theme.secondaryText)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                Toggle("连后熄屏", isOn: $quickTurnScreenOff)
+                    .font(.footnote)
+                    .fixedSize()
+            }
+
+            if discovery.frpError == "need frps admin account" {
+                Text("填一次 frps 管理账号（拉「哪些手机挂着 frpc」用，存本机）：")
+                    .font(.footnote)
+                    .foregroundColor(Theme.secondaryText)
+                HStack(spacing: 8) {
+                    TextField("frps user", text: $adminUser)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                        .font(.footnote)
+                    SecureField("password", text: $adminPass)
+                        .font(.footnote)
+                    Button("保存") {
+                        FrpSettings.saveAdmin(user: adminUser, pass: adminPass)
+                        Task { await discovery.run() }
+                    }
+                    .font(.footnote)
+                    .disabled(adminUser.isEmpty || adminPass.isEmpty)
+                }
+            } else if let e = discovery.frpError, e != "frps not configured" {
+                Text(LocalizedStringKey("frpc 名单不可用：\(e)"))
+                    .font(.footnote)
+                    .foregroundColor(Theme.secondaryText)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    // MARK: - 统一设备列表（扫描到的 + 已保存的）
 
     private var deviceList: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Saved devices")
+            Text("设备（\(homeRows.count)）")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Theme.secondaryText)
                 .textCase(nil)
 
-            ForEach(savedSessions) { session in
-                DeviceRow(
-                    session: session,
-                    status: statusText(for: session),
-                    kind: statusKind(for: session),
-                    isActive: isActive(session),
+            if homeRows.isEmpty && !discovery.running {
+                Text("还没发现设备。确保手机在同一个 WiFi（开着 adb tcpip 5555），或者它挂着 frpc 在线；下拉可重新扫描。")
+                    .font(.footnote)
+                    .foregroundColor(Theme.secondaryText)
+                    .padding(.vertical, 12)
+            }
+
+            ForEach(homeRows) { row in
+                HomeDeviceRow(
+                    row: row,
+                    isActive: row.session.map { isActive($0) } ?? false,
                     isBusy: connectionManager.isConnecting,
-                    onConnect: { onConnectSession(session) },
+                    onOpen: { openQuickConnect(for: row) },
+                    onConnect: { if let s = row.session { onConnectSession(s) } },
                     onDisconnect: { SessionConnectionManager.shared.disconnectCurrent() },
-                    onEdit: { onEditSession(session) },
-                    onDuplicate: { onDuplicateSession(session) },
+                    onEdit: { if let s = row.session { onEditSession(s) } },
+                    onDuplicate: { if let s = row.session { onDuplicateSession(s) } },
                     onDelete: {
-                        sessionPendingDeletion = session
-                        showDeleteConfirm = true
+                        if let s = row.session {
+                            sessionPendingDeletion = s
+                            showDeleteConfirm = true
+                        }
+                    },
+                    onRename: {
+                        if let d = row.discovered {
+                            renameTarget = d
+                            renameText = discovery.customNames[d.id] ?? ""
+                        }
                     }
                 )
             }
         }
     }
 
-    // MARK: - 状态推导
+    // MARK: - 合并行（已保存会话 ∪ 发现结果）
 
-    /// 这台设备是不是「当前会话」。
+    struct HomeRow: Identifiable {
+        let id: String
+        var title: String
+        var subtitle: String
+        var status: String       // Idle / Connecting / Connected / Failed / 新发现
+        var statusKind: StatusPillKind
+        var lanOn: Bool          // 局域网灯
+        var relayOn: Bool        // 家里 IPv6 中转灯
+        var p2pOn: Bool          // frpc 打洞灯
+        var tsOn: Bool           // Tailscale 灯
+        var session: ScrcpySession?
+        var discovered: DiscoveredDevice?
+    }
+
+    private var homeRows: [HomeRow] {
+        var rows: [HomeRow] = []
+        var usedDiscoveryIds = Set<String>()
+
+        // ① 已保存的会话先占位（保持原有顺序）
+        for session in savedSessions {
+            let m = session.sessionModel
+            let match = discovery.devices.first { dev in
+                if let proxy = dev.frpProxyName, !m.frpProxyName.isEmpty,
+                   proxy.caseInsensitiveCompare(m.frpProxyName) == .orderedSame {
+                    return true
+                }
+                if let lan = dev.lanHost, lan == m.hostReal { return true }
+                return false
+            }
+            if let match { usedDiscoveryIds.insert(match.id) }
+            rows.append(HomeRow(
+                id: "session-\(session.id.uuidString)",
+                title: session.title,
+                subtitle: "\(m.hostReal):\(m.port)",
+                status: statusText(for: session),
+                statusKind: statusKind(for: session),
+                lanOn: match?.canLan ?? false,
+                relayOn: match?.canRelay ?? false,
+                p2pOn: match?.canFrp ?? false,
+                tsOn: match?.tailnetOnline ?? false,
+                session: session,
+                discovered: match
+            ))
+        }
+
+        // ② 没被会话覆盖的发现设备补在后面
+        for dev in discovery.devices where !usedDiscoveryIds.contains(dev.id) {
+            rows.append(HomeRow(
+                id: "device-\(dev.id)",
+                title: discovery.name(for: dev),
+                subtitle: subtitle(for: dev),
+                status: "新发现",
+                statusKind: .idle,
+                lanOn: dev.canLan,
+                relayOn: dev.canRelay,
+                p2pOn: dev.canFrp,
+                tsOn: dev.tailnetOnline,
+                session: nil,
+                discovered: dev
+            ))
+        }
+        return rows
+    }
+
+    /// 发现设备的副标题：局域网地址 > frpc 在线 > 离线
+    private func subtitle(for dev: DiscoveredDevice) -> String {
+        if let host = dev.lanHost { return "\(host):5555" }
+        if let proxy = dev.frpProxyName {
+            return dev.relayPort.map { "via frpc · 中转口 \($0)" } ?? "via frpc"
+        }
+        return "未上线"
+    }
+
     private func isActive(_ session: ScrcpySession) -> Bool {
         guard let current = connectionManager.currentSession else { return false }
         return current.id == session.sessionModel.id
@@ -236,24 +354,42 @@ struct DevicesView: View {
             return .warning
         }
     }
+
+    // MARK: - 点「发现设备」→ 连接设置（临时会话，不落盘）
+
+    private func openQuickConnect(for row: HomeRow) {
+        guard let dev = row.discovered else { return }
+        var model = ScrcpySessionModel()
+        model.host = dev.lanHost ?? FrpSettings.load().serverAddr
+        model.port = "5555"
+        model.sessionName = discovery.name(for: dev)
+        model.useFrp = dev.canFrp
+        model.frpProxyName = dev.frpProxyName ?? "phone-\(dev.model)-\(dev.suffix)"
+        // 发现到的中转端口直接预填 —— 进设置页选「家里 IPv6 中转」就不用再手敲
+        if let rp = dev.relayPort { model.frpRemotePort = String(rp) }
+        model.adbOptions.turnScreenOff = quickTurnScreenOff
+        // ★ 就地弹设置页（不关不开 —— 同 tick 二次 present 会被 UIKit 吞，见交接-2026-10-09）
+        scanSheetMode = .quickConnect(model)
+        isScanSheetShown = true
+    }
 }
 
-// MARK: - 一行设备
+// MARK: - 一行设备（统一列表用）
 
-private struct DeviceRow: View {
-    let session: ScrcpySession
-    let status: String
-    let kind: StatusPillKind
+private struct HomeDeviceRow: View {
+    let row: DevicesView.HomeRow
     let isActive: Bool
     let isBusy: Bool
+    let onOpen: () -> Void
     let onConnect: () -> Void
     let onDisconnect: () -> Void
     let onEdit: () -> Void
     let onDuplicate: () -> Void
     let onDelete: () -> Void
+    let onRename: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
                     .fill(Color(hex: 0x3DDC84).opacity(0.16))
@@ -265,49 +401,65 @@ private struct DeviceRow: View {
             .frame(width: 42, height: 42)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(session.title)
+                Text(row.title)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.primary)
                     .lineLimit(1)
 
-                Text("\(session.sessionModel.hostReal):\(session.sessionModel.port)")
+                Text(row.subtitle)
                     .font(.system(size: 12))
                     .foregroundColor(Theme.secondaryText)
                     .lineLimit(1)
 
-                StatusPill(text: LocalizedStringKey(status), kind: kind)
-                    .padding(.top, 1)
+                HStack(spacing: 6) {
+                    StatusPill(text: LocalizedStringKey(row.status), kind: row.statusKind)
+
+                    // 四路状态灯：绿 = 当前可走，灰 = 不可走
+                    MethodChip(text: "局域网", on: row.lanOn)
+                    MethodChip(text: "中转", on: row.relayOn)
+                    MethodChip(text: "打洞", on: row.p2pOn)
+                    MethodChip(text: "TS", on: row.tsOn)
+                }
+                .padding(.top, 1)
             }
 
             Spacer(minLength: 6)
 
-            if isActive {
-                Button(action: onDisconnect) {
-                    Text("Disconnect")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(Theme.dangerForeground)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(
-                            Capsule(style: .continuous)
-                                .stroke(Theme.dangerForeground.opacity(0.5), lineWidth: 1)
-                        )
+            if row.session != nil {
+                if isActive {
+                    Button(action: onDisconnect) {
+                        Text("断开")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(Theme.dangerForeground)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .stroke(Theme.dangerForeground.opacity(0.5), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: onConnect) {
+                        Text("连接")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(
+                                Capsule(style: .continuous).fill(Theme.accent)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusy)
+                    .opacity(isBusy ? 0.5 : 1)
                 }
-                .buttonStyle(.plain)
             } else {
-                Button(action: onConnect) {
-                    Text("Connect")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 7)
-                        .background(
-                            Capsule(style: .continuous).fill(Theme.accent)
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(isBusy)
-                .opacity(isBusy ? 0.5 : 1)
+                // 未保存的发现设备：戳这里进「连接设置」（四路任选）
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 15))
+                    .foregroundColor(Theme.accent)
+                    .padding(6)
             }
         }
         .padding(12)
@@ -319,182 +471,40 @@ private struct DeviceRow: View {
             RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                 .stroke(Theme.separator, lineWidth: 0.5)
         )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if row.discovered != nil { onOpen() }
+        }
         .contextMenu {
-            Button { onConnect() } label: { Label("Connect", systemImage: "bolt.horizontal") }
-            Button { onEdit() } label: { Label("Edit", systemImage: "pencil") }
-            Button { onDuplicate() } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
-            Button { onDelete() } label: { Label("Delete", systemImage: "trash") }
+            if row.discovered != nil {
+                Button { onRename() } label: { Label("重命名", systemImage: "pencil") }
+            }
+            if row.session != nil {
+                Button { onConnect() } label: { Label("Connect", systemImage: "bolt.horizontal") }
+                Button { onEdit() } label: { Label("编辑（全部参数）", systemImage: "slider.horizontal.3") }
+                Button { onDuplicate() } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+                Button(role: .destructive) { onDelete() } label: { Label("Delete", systemImage: "trash") }
+            }
         }
     }
 }
 
-// MARK: - 局域网扫描
+// MARK: - 四路状态灯的小胶囊
 
-/// 扫本机网段找开着的 adb 端口（5555）。
-///
-/// 底层就是 `LanDiscovery.discover()` —— 连接时自动发现用的同一个函数，
-/// 这里只是把结果摆出来让用户挑，省得手敲 IP。
-struct LanScanSheet: View {
-    var onConnect: (DiscoveredDevice, String) -> Void
-    var onManual: () -> Void
-
-    @Environment(\.presentationMode) private var presentationMode
-    @StateObject private var discovery = DeviceDiscovery()
-    @State private var adminUser = ""
-    @State private var adminPass = ""
-    @State private var renameTarget: DiscoveredDevice? = nil
-    @State private var renameText = ""
-
-    // 与 DevicesView 共用同一个 key：点选直连的临时会话「连上后是否熄屏」
-    @AppStorage("quickConnect.turnScreenOff") private var quickTurnScreenOff = false
-
-    var body: some View {
-        NavigationView {
-            List {
-                Section {
-                    HStack(spacing: 10) {
-                        ProgressView().opacity(discovery.running ? 1 : 0)
-                        Text(LocalizedStringKey(discovery.phase.isEmpty ? "Ready" : discovery.phase))
-                            .font(.footnote)
-                            .foregroundColor(Theme.secondaryText)
-                    }
-                }
-
-                Section {
-                    Toggle("Turn Remote Screen Off After Connected", isOn: $quickTurnScreenOff)
-                    Text("关 = 被控端保持亮屏（电视等场景）；开 = 连上后熄屏省电。只影响「点选直连」的临时会话，改一次即记住。")
-                        .font(.footnote)
-                        .foregroundColor(Theme.secondaryText)
-                }
-
-                if let frpError = discovery.frpError {
-                    Section(header: Text("frpc online list")) {
-                        if frpError == "need frps admin account" {
-                            Text("Enter the frps admin account (webServer) to list online devices — saved once, used for every scan.")
-                                .font(.footnote)
-                                .foregroundColor(Theme.secondaryText)
-                            TextField("frps admin user", text: $adminUser)
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-                            SecureField("frps admin password", text: $adminPass)
-                            Button("Save") {
-                                FrpSettings.saveAdmin(user: adminUser, pass: adminPass)
-                                Task { await discovery.run() }
-                            }
-                            .disabled(adminUser.isEmpty || adminPass.isEmpty)
-                        } else {
-                            Text(LocalizedStringKey(frpError))
-                                .font(.footnote)
-                                .foregroundColor(Theme.secondaryText)
-                        }
-                    }
-                }
-
-                if !discovery.devices.isEmpty {
-                    Section(header: Text("Found")) {
-                        ForEach(discovery.devices) { device in
-                            Button {
-                                onConnect(device, discovery.name(for: device))
-                            } label: {
-                                HStack {
-                                    Image(systemName: "iphone.gen3")
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(discovery.name(for: device))
-                                        Text(LocalizedStringKey(subtitle(device)))
-                                            .font(.footnote)
-                                            .foregroundColor(Theme.secondaryText)
-                                    }
-                                    Spacer()
-                                    HStack(spacing: 6) {
-                                        if device.canLan { DiscoveryBadge(text: "LAN", color: .green) }
-                                        if device.canFrp { DiscoveryBadge(text: "frpc", color: .blue) }
-                                    }
-                                }
-                            }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button {
-                                    beginRename(device)
-                                } label: {
-                                    Label("Rename", systemImage: "pencil")
-                                }
-                                .tint(.orange)
-                            }
-                            .contextMenu {
-                                Button {
-                                    beginRename(device)
-                                } label: {
-                                    Label("Rename", systemImage: "pencil")
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !discovery.running, discovery.devices.isEmpty, !discovery.phase.isEmpty,
-                   discovery.phase != "Ready", discovery.phase != "Done" {
-                    Text("No devices found. Make sure the phone is on the same Wi-Fi (adb tcpip 5555) or frpc is online.")
-                        .font(.footnote)
-                        .foregroundColor(Theme.secondaryText)
-                }
-            }
-            .listStyle(.insetGrouped)
-            .navigationBarTitle("Discover Devices", displayMode: .inline)
-            .navigationBarItems(
-                leading: Button("Manual") { onManual() },
-                trailing: HStack(spacing: 12) {
-                    Button("Rescan") { Task { await discovery.run() } }
-                        .disabled(discovery.running)
-                    Button("Done") { presentationMode.wrappedValue.dismiss() }
-                }
-            )
-            .onAppear {
-                let saved = FrpSettings.load()
-                adminUser = saved.adminUser
-                adminPass = saved.adminPass
-                Task { await discovery.run() }
-            }
-            .alert("Rename Device", isPresented: Binding(
-                get: { renameTarget != nil },
-                set: { if !$0 { renameTarget = nil } }
-            )) {
-                TextField("Device name", text: $renameText)
-                Button("Save") {
-                    if let target = renameTarget {
-                        discovery.rename(target, to: renameText)
-                    }
-                    renameTarget = nil
-                }
-                Button("Cancel", role: .cancel) { renameTarget = nil }
-            } message: {
-                Text("Remembered for this device (model + serial suffix). Leave empty to reset.")
-            }
-        }
-        .navigationViewStyle(StackNavigationViewStyle())
-    }
-
-    private func beginRename(_ device: DiscoveredDevice) {
-        renameTarget = device
-        renameText = discovery.customNames[device.id] ?? ""
-    }
-
-    /// 副标题：局域网就显示地址；只有 frpc 就说明走隧道
-    private func subtitle(_ device: DiscoveredDevice) -> String {
-        if let host = device.lanHost { return host }
-        return "via frpc tunnel"
-    }
-}
-
-private struct DiscoveryBadge: View {
+private struct MethodChip: View {
     let text: String
-    let color: Color
+    let on: Bool
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold))
+            .font(.system(size: 10, weight: .semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(color.opacity(0.15))
-            .foregroundColor(color)
-            .cornerRadius(6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(on ? Color.green.opacity(0.16) : Color.gray.opacity(0.12))
+            )
+            .foregroundColor(on ? Color(hex: 0x1E8E3E) : Theme.secondaryText)
+            .lineLimit(1)
     }
 }

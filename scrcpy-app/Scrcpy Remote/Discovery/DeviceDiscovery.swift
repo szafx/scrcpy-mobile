@@ -26,10 +26,13 @@ struct DiscoveredDevice: Identifiable {
     let suffix: String          // 1911
     var lanHost: String?        // 局域网地址（nil = 不在局域网）
     var frpProxyName: String?   // frpc 在线时的 proxy 名（nil = 没挂 frpc）
+    var relayPort: Int?         // frpc 的 -tcp remotePort（6000~6099；nil = 不知道）
+    var tailnetOnline: Bool = false  // tailnet 探针结果（装了带 relay 的新版 FrpcApp 且在线）
 
     var displayName: String { "\(model) · \(suffix)" }
     var canLan: Bool { lanHost != nil }
     var canFrp: Bool { frpProxyName != nil }
+    var canRelay: Bool { frpProxyName != nil && relayPort != nil }
 }
 
 @MainActor
@@ -71,6 +74,7 @@ final class DeviceDiscovery: ObservableObject {
 
     /// 跑一轮完整发现：先 frpc 名单（快），再局域网扫描 + 批量识别（逐台出现）。
     func run() async {
+        guard !running else { return }   // 已在跑（预热/上一次下拉刷新）就复用那一轮
         running = true
         devices = []
         frpError = nil
@@ -118,6 +122,104 @@ final class DeviceDiscovery: ObservableObject {
 
         phase = devices.isEmpty ? "No devices found" : "Done"
         running = false
+        // 顺手探一遍 tailnet（首页 TS 灯）
+        await refreshTailnetStatus()
+    }
+
+    // MARK: - 实时轻量刷新（首页轮询用）
+
+    /// 轻量刷新：只重拉 frps 名单 + 探 tailnet + 探已知局域网地址的存活。
+    /// **不跑全子网扫描** —— 那玩意耗电，还会把 adb 设备表弄脏（实测 push 会失败）。
+    func refreshLightweight() async {
+        guard !running else { return }   // 全量扫描进行中就跳过这轮
+
+        // 1) frps 名单（xtcp + tcp 两把，1KB 级请求，可以高频）
+        let (frpDevices, frpErr) = await Self.fetchFrpOnline()
+        frpError = frpErr
+        merge(frpDevices)
+
+        // 2) 已经从 frps 掉线的设备：清掉 frp 标记（打洞/中转灯变灰）
+        let onlineIds = Set(frpDevices.map { $0.id })
+        for i in devices.indices {
+            if devices[i].frpProxyName != nil && !onlineIds.contains(devices[i].id) {
+                devices[i].frpProxyName = nil
+                devices[i].relayPort = nil
+            }
+        }
+
+        // 3) tailnet 探针
+        await refreshTailnetStatus()
+
+        // 4) 已知局域网地址的存活探测（每台一个 0.6s 往返；几台就几个包）
+        await refreshLanLiveness()
+    }
+
+    /// 对已知的局域网地址做轻量存活探测：死掉的把 lanHost 清成 nil（灯变灰）。
+    private func refreshLanLiveness() async {
+        let targets: [(Int, String)] = devices.enumerated().compactMap { (i, d) in
+            guard let h = d.lanHost else { return nil }
+            return (i, h)
+        }
+        guard !targets.isEmpty else { return }
+
+        let results = await withTaskGroup(of: (Int, Bool).self) { group -> [(Int, Bool)] in
+            for (i, host) in targets {
+                group.addTask {
+                    let ok = await withCheckedContinuation { cont in
+                        DispatchQueue.global(qos: .utility).async {
+                            cont.resume(returning: LanDiscovery.measureRoundTrip(host: host, port: 5555, timeout: 0.6) != nil)
+                        }
+                    }
+                    return (i, ok)
+                }
+            }
+            var out: [(Int, Bool)] = []
+            for await r in group { out.append(r) }
+            return out
+        }
+
+        for (i, ok) in results where i < devices.count {
+            if !ok { devices[i].lanHost = nil }
+        }
+    }
+
+    /// 对 frpc 在线的设备探一遍 tailnet（首页 TS 灯）。
+    ///
+    /// 名字约定：tailnet 节点名 = frpc 的 proxy 名全小写
+    /// （见 FrpcApp 的 TsnetRunner：`TS_HOSTNAME = proxyName.lowercase()`），
+    /// 所以拼上本节点的 MagicDNS 后缀就是它的全名。
+    func refreshTailnetStatus() async {
+        guard TailscaleManager.shared.isStarted(),
+              let suffix = TailscaleManager.shared.magicDNSSuffix() else {
+            for i in devices.indices { devices[i].tailnetOnline = false }
+            return
+        }
+
+        let targets: [(Int, String)] = devices.enumerated().compactMap { (idx, dev) in
+            guard let proxy = dev.frpProxyName else { return nil }
+            return (idx, "\(proxy.lowercased()).\(suffix)")
+        }
+        guard !targets.isEmpty else { return }
+
+        let results = await withTaskGroup(of: (Int, Bool).self) { group -> [(Int, Bool)] in
+            for (idx, fqdn) in targets {
+                group.addTask {
+                    let ok = await withCheckedContinuation { cont in
+                        DispatchQueue.global(qos: .utility).async {
+                            cont.resume(returning: TailscaleManager.shared.probe(host: fqdn))
+                        }
+                    }
+                    return (idx, ok)
+                }
+            }
+            var out: [(Int, Bool)] = []
+            for await r in group { out.append(r) }
+            return out
+        }
+
+        for (idx, ok) in results where idx < devices.count {
+            devices[idx].tailnetOnline = ok
+        }
     }
 
     // MARK: - 合并
@@ -127,6 +229,7 @@ final class DeviceDiscovery: ObservableObject {
             if let index = devices.firstIndex(where: { $0.id == device.id }) {
                 if let lan = device.lanHost { devices[index].lanHost = lan }
                 if let frp = device.frpProxyName { devices[index].frpProxyName = frp }
+                if let rp = device.relayPort { devices[index].relayPort = rp }
             } else {
                 devices.append(device)
             }
@@ -282,6 +385,44 @@ final class DeviceDiscovery: ObservableObject {
                                           suffix: suffix,
                                           lanHost: nil,
                                           frpProxyName: name))
+        }
+
+        // 再拉一次 tcp 名单：中转端口（remotePort）在那边 —— 「家里 IPv6 中转」灯要用。
+        // 失败也不影响主流程（只是中转灯不亮）。
+        var relayPorts: [String: Int] = [:]   // proxy 基名（phone-xxx）→ remotePort
+        if let urlTcp = URL(string: "http://\(settings.serverAddr):\(settings.adminPort)/api/proxy/tcp") {
+            var reqTcp = URLRequest(url: urlTcp)
+            reqTcp.timeoutInterval = 12
+            reqTcp.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            reqTcp.setValue("Basic \(credential)", forHTTPHeaderField: "Authorization")
+
+            let jsonTcp: [String: Any]? = await withCheckedContinuation { continuation in
+                URLSession.shared.dataTask(with: reqTcp) { data, _, error in
+                    guard let data, error == nil,
+                          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(returning: object)
+                }.resume()
+            }
+
+            if let proxiesTcp = jsonTcp?["proxies"] as? [[String: Any]] {
+                for proxy in proxiesTcp {
+                    guard let name = proxy["name"] as? String, name.hasSuffix("-tcp") else { continue }
+                    let base = String(name.dropLast(4))
+                    if let conf = proxy["conf"] as? [String: Any],
+                       let rp = conf["remotePort"] as? Int {
+                        relayPorts[base] = rp
+                    }
+                }
+            }
+        }
+
+        for i in found.indices {
+            if let proxy = found[i].frpProxyName, let rp = relayPorts[proxy] {
+                found[i].relayPort = rp
+            }
         }
         return (found, nil)
     }

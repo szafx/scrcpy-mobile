@@ -1012,7 +1012,8 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
                 
                 // 如果是 Tailscale / frp 连接且首次获取信息失败，则重试一次
                 // 仅当隧道本身没建起来时重试（地址填错的话重试也没用，但值得再试一次打洞）
-                if connectionInfo == nil && (session.useTailscale || session.useFrp) {
+                // （2026-10-09：手选模式 p2p/tailscale 同样适用 —— 见 usesTunnelTransport）
+                if connectionInfo == nil && (session.useTailscale || session.useFrp || session.usesTunnelTransport) {
                     print("⚠️ [SessionConnectionManager] Failed to get tunnel connection info, retrying once...")
                     
                     // 停止当前转发并等待
@@ -1453,7 +1454,8 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         }
 
         // 转发要停干净 —— 旧隧道把本机端口占着不放，新的就绑不上
-        if isUsingTailscale || currentSession?.useFrp == true {
+        // （2026-10-09：判据换成 usesTunnelTransport，手选的 p2p/tailscale 也覆盖）
+        if isUsingTailscale || currentSession?.usesTunnelTransport == true {
             SessionNetworking.shared.stopAllForwarding()
         }
 

@@ -605,6 +605,24 @@ class TailscaleManager {
         free(dnsPtr)
         return dnsString
     }
+
+    /// 探一下 tailnet 上的目标在不在线（真拨一次 TCP，成功 = 在线）。
+    /// 首页「Tailscale 灯」的判据 —— 节点在不在线没有轻量查询接口，只有真连一下才诚实。
+    /// host 支持 MagicDNS 全名（phone-xxx.tailxxxx.ts.net）或 100.x 地址。
+    func probe(host: String, port: Int = 5555, timeoutMs: Int32 = 1200) -> Bool {
+        guard isStarted() else { return false }
+        return host.withCString { cstr in
+            tsnet_probe(UnsafeMutablePointer(mutating: cstr), Int32(port), timeoutMs) == 0
+        }
+    }
+
+    /// 本节点的 MagicDNS 域名后缀（如 "taildf1173.ts.net"）——用它可以拼出其它节点的全名。
+    /// 例：本节点 "home.taildf1173.ts.net" → 后缀 "taildf1173.ts.net"。
+    func magicDNSSuffix() -> String? {
+        guard let full = getLastMagicDNS(), !full.isEmpty else { return nil }
+        guard let dot = full.firstIndex(of: ".") else { return nil }
+        return String(full[full.index(after: dot)...])
+    }
     
     /// Get all available Tailscale IP addresses
     /// - Returns: Comma-separated list of IP addresses, or nil if not available

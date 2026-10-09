@@ -232,6 +232,30 @@ func (f *TSNetForwarder) stopServer() {
 }
 
 // TsnetStartForward starts port forwarding
+// TsnetProbe 拨号探测 tailnet 上的目标是否可达（给 App 首页的「Tailscale 灯」用）。
+//
+// 为什么要真拨一次：一个 tailnet 节点在不在线，本端没有轻量查询接口；
+// 真的 Dial 一次（走内置节点的 netstack，用 MagicDNS 名或 100.x 都行）成功/失败
+// 才是诚实的判据。拨通即关，不留连接。
+func (f *TSNetForwarder) TsnetProbe(remoteAddr string, remotePort int, timeoutMs int) error {
+	f.mutex.RLock()
+	srv := f.server
+	f.mutex.RUnlock()
+	if srv == nil {
+		return fmt.Errorf("tsnet server not started")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+	defer cancel()
+
+	conn, err := srv.Dial(ctx, "tcp", net.JoinHostPort(remoteAddr, fmt.Sprintf("%d", remotePort)))
+	if err != nil {
+		return err
+	}
+	conn.Close()
+	return nil
+}
+
 func (f *TSNetForwarder) TsnetStartForward(remoteAddr string, remotePort int, localPort int) error {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()

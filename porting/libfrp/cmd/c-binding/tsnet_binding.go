@@ -188,6 +188,20 @@ func tsnet_get_last_error() *C.char {
 	return C.CString(tsnetLastError)
 }
 
+// tsnet_probe 拨号探测 tailnet 上的目标是否可达（0=可达，-1=不可达/失败）
+// 给 App 首页的「Tailscale 灯」用。
+//
+//export tsnet_probe
+func tsnet_probe(addr *C.char, port C.int, timeoutMs C.int) C.int {
+	if tsnetForwarder == nil {
+		return -1
+	}
+	if err := tsnetForwarder.TsnetProbe(C.GoString(addr), int(port), int(timeoutMs)); err != nil {
+		return -1
+	}
+	return 0
+}
+
 // tsnet_start_forward starts port forwarding
 //
 //export tsnet_start_forward

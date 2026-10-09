@@ -260,6 +260,12 @@ enum SessionDeviceType: String, Codable, CaseIterable {
     @objc var useFrp: Bool = false
     /// 该手机在 frpc 里 `[[proxies]]` 的 name
     @objc var frpProxyName: String = ""
+
+    /// 用户手选的连接方式；空 = 自动（旧行为，向后兼容）。
+    /// 取值见 `ConnectionMode`（lan / relay / p2p / tailscale）。
+    @objc var connectionMode: String = ""
+    /// 「家里 IPv6 中转」模式用的 frps 中转端口（6000~6099，即 frpc 的 -tcp proxy remotePort）
+    @objc var frpRemotePort: String = ""
     
     var hostReal: String {
         get {
@@ -356,6 +362,9 @@ enum SessionDeviceType: String, Codable, CaseIterable {
         // frp 隧道（老会话里没有这两个键，给默认值）
         self.useFrp = try container.decodeIfPresent(Bool.self, forKey: .useFrp) ?? false
         self.frpProxyName = try container.decodeIfPresent(String.self, forKey: .frpProxyName) ?? ""
+        // 连接方式（2026-10-09 新增；老会话没有这两个键 → 空 = 自动）
+        self.connectionMode = try container.decodeIfPresent(String.self, forKey: .connectionMode) ?? ""
+        self.frpRemotePort = try container.decodeIfPresent(String.self, forKey: .frpRemotePort) ?? ""
         
         // Decode nested objects with error handling
         do {
@@ -390,10 +399,49 @@ enum SessionDeviceType: String, Codable, CaseIterable {
     }
 }
 
+/// 用户手选的「连接方式」—— 点名的四种**都不自动回落**，连不上就明确失败。
+///
+/// 为什么不复用 useFrp/useTailscale 两个开关：那套是「自动」模式的内部实现
+/// （自动 = 局域网优先 → 勾了的隧道兜底）。用户要能**点名单走某一条**，
+/// 所以单独一个字段，和旧开关互不干扰（空 = 自动 = 旧行为，老会话零迁移）。
+enum ConnectionMode: String, CaseIterable {
+    case auto      = ""
+    case lan       = "lan"
+    case homeRelay = "relay"
+    case frpP2P    = "p2p"
+    case tailscale = "tailscale"
+
+    var label: String {
+        switch self {
+        case .auto:      return "自动（局域网优先，隧道兜底）"
+        case .lan:       return "局域网"
+        case .homeRelay: return "家里 IPv6 中转"
+        case .frpP2P:    return "frpc 打洞 (P2P)"
+        case .tailscale: return "Tailscale"
+        }
+    }
+}
+
+extension ScrcpySessionModel {
+    var connectionModeEnum: ConnectionMode {
+        ConnectionMode(rawValue: connectionMode) ?? .auto
+    }
+
+    /// 这条会话是否会走「本机监听 + 转发」的隧道（frp / tsnet）——
+    /// 断开时要把转发停干净（见 SessionConnectionManager）。
+    var usesTunnelTransport: Bool {
+        switch connectionModeEnum {
+        case .auto:               return useFrp || useTailscale
+        case .frpP2P, .tailscale: return true
+        case .lan, .homeRelay:    return false
+        }
+    }
+}
+
 class SessionManager {
     static let shared = SessionManager()
     private let keychain = KeychainSwift()
-    
+
     private let sessionKey = "scrcpy.sessions"
     private let migrationKey = "scrcpy.migration.completed"
     

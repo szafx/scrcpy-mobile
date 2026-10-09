@@ -31,6 +31,8 @@ struct SessionCreateView: View {
     // Local state for toggles that control show/hide to ensure UI refresh
     @State private var useTailscale: Bool = false
     @State private var useFrp: Bool = false
+    /// 手选连接方式（2026-10-09）：.auto = 旧行为；其它四种点名走、不回落
+    @State private var connMode: ConnectionMode = .auto
     @State private var enableVNCaudio: Bool = false
     @State private var audioMode: Int = 0   // 0=原设备播放(不转发) 1=控制端播放 2=双端(Android 13+)
     @State private var startNewDisplay: Bool = false
@@ -86,6 +88,7 @@ struct SessionCreateView: View {
         // Initialize toggle states
         _useTailscale = State(initialValue: sessionModel.useTailscale)
         _useFrp = State(initialValue: sessionModel.useFrp)
+        _connMode = State(initialValue: sessionModel.connectionModeEnum)
         _enableVNCaudio = State(initialValue: sessionModel.vncOptions.enableAudio)
         _audioMode = State(initialValue: sessionModel.adbOptions.enableAudio ? (sessionModel.adbOptions.audioDup ? 2 : 1) : 0)
         _startNewDisplay = State(initialValue: sessionModel.adbOptions.startNewDisplay)
@@ -115,6 +118,51 @@ struct SessionCreateView: View {
                 }
                 
                 Section(header: Text("Connection Options")) {
+                    // ★ 连接方式（2026-10-09）：默认「自动」= 原来的三级逻辑；
+                    //   用户也可以点名走某一条（点名的路不成功就明确失败，不偷偷换路）。
+                    Picker("连接方式", selection: $connMode.animation()) {
+                        ForEach(ConnectionMode.allCases, id: \.self) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .onChange(of: connMode) { newValue in
+                        sessionModel.connectionMode = newValue.rawValue
+                    }
+
+                    if connMode == .lan {
+                        Text("只走局域网：Host 填手机在 WiFi 里的 IP（留设备身份也行，会自己找）。连不上不会自动改走隧道。")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                    }
+
+                    if connMode == .homeRelay {
+                        TextField("中转端口（6000~6099）", text: $sessionModel.frpRemotePort)
+                            .keyboardType(.numberPad)
+                        Text("经家里的 frps 中转口直连（纯 TCP、不经过打洞，网络抖动时最稳）。每台手机不同：COR-AL10=6001、PAFT00=6010、PGX110=6011、电视=6002。")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                    }
+
+                    if connMode == .frpP2P {
+                        TextField("frp Proxy Name", text: $sessionModel.frpProxyName)
+                            .autocorrectionDisabled()
+                            .autocapitalization(.none)
+                        Text("走 frpc 打洞（P2P 直连最快）。填这台手机的 proxy 名；打洞不成功时 frp 内部会自动退中转。")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                    }
+
+                    if connMode == .tailscale {
+                        Text("走内置 Tailscale：Host 填手机在 tailnet 里的 100.x 地址。")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                    }
+
+                    if connMode == .auto {
                     Toggle("Connect over Tailscale", isOn: $useTailscale.animation())
                         .onChange(of: useTailscale) { newValue in
                             sessionModel.useTailscale = newValue
@@ -181,6 +229,7 @@ struct SessionCreateView: View {
                             .foregroundColor(.secondary)
                             .padding(.top, 2)
                     }
+                    }   // end if connMode == .auto（上面两个开关只在自动模式里出现）
 
                     if effectiveDeviceType == .adb {
                         Toggle("Force Connect ADB Forward", isOn: $sessionModel.adbOptions.forceAdbForward)
@@ -459,6 +508,7 @@ struct SessionCreateView: View {
 
                 // Initialize toggle state variables
                 useTailscale = sessionModel.useTailscale
+                connMode = sessionModel.connectionModeEnum
                 enableVNCaudio = sessionModel.vncOptions.enableAudio
                 audioMode = sessionModel.adbOptions.enableAudio ? (sessionModel.adbOptions.audioDup ? 2 : 1) : 0
                 startNewDisplay = sessionModel.adbOptions.startNewDisplay
@@ -676,20 +726,38 @@ struct SessionCreateView: View {
             }
         }
         
+        // 连接方式（2026-10-09 手选模式）：校验按「点名的方式」来，而不是旧开关
+        let mode = sessionModel.connectionModeEnum
+
         // Check Tailscale configuration
-        if sessionModel.useTailscale && appSettings.tailscaleAuthKey.isEmpty {
+        let needsTailscale = (mode == .auto && sessionModel.useTailscale) || mode == .tailscale
+        if needsTailscale && appSettings.tailscaleAuthKey.isEmpty {
             validationErrorMessage = NSLocalizedString("Tailscale authentication is required but not configured.", comment: "Validation: tailscale not configured")
             return false
         }
 
         // Check frp tunnel configuration
-        if sessionModel.useFrp {
+        let needsFrp = (mode == .auto && sessionModel.useFrp) || mode == .frpP2P
+        if needsFrp {
             if !FrpSettings.load().isConfigured {
                 validationErrorMessage = NSLocalizedString("frp server / secret key is required but not configured. Open frp Tunnel settings first.", comment: "Validation: frp not configured")
                 return false
             }
             if sessionModel.frpProxyName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 validationErrorMessage = NSLocalizedString("Please enter the frp proxy name of this device.", comment: "Validation: frp proxy name empty")
+                return false
+            }
+        }
+
+        // 家里 IPv6 中转：服务器地址要配好 + 中转端口要在 6000~6099
+        if mode == .homeRelay {
+            if !FrpSettings.load().isConfigured {
+                validationErrorMessage = NSLocalizedString("frp server / secret key is required but not configured. Open frp Tunnel settings first.", comment: "Validation: frp not configured")
+                return false
+            }
+            let relayPort = Int(sessionModel.frpRemotePort.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+            if !(6000...6099).contains(relayPort) {
+                validationErrorMessage = NSLocalizedString("请填这台手机的中转端口（6000~6099）。", comment: "Validation: relay remote port")
                 return false
             }
         }

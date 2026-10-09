@@ -27,6 +27,7 @@ enum ConnectionKind: Equatable {
     case lan            // 同一局域网，直连（最快）
     case frpP2P         // frp XTCP 打洞成功，P2P 直连
     case frpRelay       // frp 没打通，经 frps 中转
+    case homeRelay      // 手选「家里 IPv6 中转」：直连 frps 的中转口（纯 TCP）
     case tailscale      // 内置 tsnet
     case direct         // 其它直连（公网地址等）
     case unknown
@@ -36,6 +37,7 @@ enum ConnectionKind: Equatable {
         case .lan:       return "局域网"
         case .frpP2P:    return "frp P2P"
         case .frpRelay:  return "frp 中转"
+        case .homeRelay: return "IPv6 中转"
         case .tailscale: return "Tailscale"
         case .direct:    return "直连"
         case .unknown:   return "未知"
@@ -48,9 +50,10 @@ enum ConnectionKind: Equatable {
         case .lan:       return 0
         case .frpP2P:    return 1
         case .tailscale: return 2
-        case .frpRelay:  return 3
-        case .direct:    return 4
-        case .unknown:   return 5
+        case .homeRelay: return 3
+        case .frpRelay:  return 4
+        case .direct:    return 5
+        case .unknown:   return 6
         }
     }
 }
@@ -167,6 +170,11 @@ final class LatencyMonitor: ObservableObject {
         }
         if manager.isUsingTailscale {
             kind = .tailscale
+            return
+        }
+        // 手选「家里 IPv6 中转」：host 是 frps 域名、走纯 TCP —— 单列一类
+        if manager.currentSession?.connectionModeEnum == .homeRelay {
+            kind = .homeRelay
             return
         }
         if let host = manager.actualHost, Self.isPrivateAddress(host) {
