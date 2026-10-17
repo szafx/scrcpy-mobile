@@ -647,6 +647,11 @@ final class DeviceDiscovery: ObservableObject {
         for proxy in proxies {
             guard let name = proxy["name"] as? String,
                   name.hasPrefix("phone-"), !name.hasSuffix("-tcp") else { continue }
+            // ★ 只认在线（2026-10-18 用户实锤）：frps 管理接口会把**离线**的旧 proxy
+            //   一起返回（status=offline）—— 不过滤的话，早就下线的死设备
+            //   （旧序列号 de91、旧电视、旧 OPPO…）会永久以「via frpc」幽灵行出现在
+            //   设备列表里，用户在 App 里怎么删都会在下次拉名单时回来。
+            if let st = proxy["status"] as? String, st != "online" { continue }
             let parts = name.split(separator: "-").map(String.init)
             guard parts.count >= 3 else { continue }
             let suffix = parts[parts.count - 1]
