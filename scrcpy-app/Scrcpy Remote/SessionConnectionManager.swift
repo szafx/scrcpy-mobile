@@ -1495,7 +1495,14 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         
         // 清理端口转发（Tailscale 和 frp 都是「本机监听 + 转发」那一套）
         if isUsingTailscale || currentSession?.useFrp == true {
-            SessionNetworking.shared.stopAllForwarding()
+            if isUsingTailscale, let port = tailscaleLocalPort {
+                // ★ 断开尾巴上顺手自愈（2026-10-12）：对端 5555 被重启弄丢时，
+                //   由 iPhone 经这条 TS 隧道补一发 `tcpip 5555`，做完再停转发。
+                //   （5555 正常时只多一次 getprop 检查，什么都不动）
+                SessionNetworking.shared.restorePlainAdbPortThenStopForwarding(localPort: port)
+            } else {
+                SessionNetworking.shared.stopAllForwarding()
+            }
         }
 
         // 主动同步 Live Activity 状态并结束（在后台计时器断开时不会收到状态通知）

@@ -329,9 +329,33 @@ class SessionNetworking {
     
     /// Stop all active port forwards
     /// - Returns: true if successful
+    /// 经 TS 隧道的会话【断开时】调用：对端 5555 若没开（重启过的典型状态），
+    /// 由 **iPhone 自己**经这条隧道远程补一发 `adb tcpip 5555` —— 下一次连接就能
+    /// 恢复全部通道（frp 打洞/中转、局域网明文、设备页四盏灯），全程不需要电脑。
+    ///
+    /// ★ 必须等这一步做完再停隧道转发（本方法内部负责收尾 stopAllForwarding）；
+    /// ★ `adb tcpip` 会重启对端 adbd —— 当前连接必断，所以只在「断开」的尾巴上做；
+    ///   自动重连路径不调 disconnectCurrent（见 SessionConnectionManager），不会误触发。
+    func restorePlainAdbPortThenStopForwarding(localPort: Int) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let client = ADBClient.shared()
+            let target = "127.0.0.1:\(localPort)"
+            let out = client.executeADBCommand(["-s", target, "shell", "getprop", "service.adb.tcp.port"],
+                                               returnCode: nil)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if out != "5555" {
+                print("[ADBHeal] 对端 5555 未开（=\(out.isEmpty ? "空" : out)）→ iPhone 经隧道执行 tcpip 5555")
+                _ = client.executeADBCommand(["-s", target, "tcpip", "5555"], returnCode: nil)
+                print("[ADBHeal] tcpip 5555 已发出（对端 adbd 会重启、隧道随之失效——正常）")
+            }
+            DispatchQueue.main.async {
+                _ = self?.stopAllForwarding()
+            }
+        }
+    }
+
     func stopAllForwarding() -> Bool {
-        var sessionIds = Array(activeSessionForwards.keys)
-        // frp 那条不记在 activeSessionForwards 里，单独带上
+        var sessionIds = Array(activeSessionForwards.keys)        // frp 那条不记在 activeSessionForwards 里，单独带上
         if let frpSessionId = activeFrpSession, !sessionIds.contains(frpSessionId) {
             sessionIds.append(frpSessionId)
         }
