@@ -87,6 +87,12 @@ struct ConsoleView: View {
                         subtitle: "Saved command sequences for this device.",
                         icon: "play.square.stack.fill",
                         kind: .push(AnyView(ActionsView()))),
+
+            ConsoleTool(index: 9,
+                        title: "Scripts",
+                        subtitle: "Visual adb scripts: tap, swipe, image match.",
+                        icon: "scroll.fill",
+                        kind: .push(AnyView(ScriptsListView()))),
         ]
     }
 
