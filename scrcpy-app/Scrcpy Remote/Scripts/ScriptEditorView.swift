@@ -83,8 +83,8 @@ struct ScriptEditorView: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button("保存") { save() }
             }
-            if !script.steps.isEmpty {
-                ToolbarItem(placement: .navigationBarLeading) {
+            ToolbarItem(placement: .navigationBarLeading) {
+                if !script.steps.isEmpty {
                     EditButton()
                 }
             }
@@ -129,7 +129,7 @@ private struct ScriptStepRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(step.type.title)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(step.enabled ? .primary : Theme.secondaryText)
+                    .foregroundColor(step.enabled ? Color.primary : Theme.secondaryText)
                 Text(step.summary)
                     .font(.system(size: 12))
                     .foregroundColor(Theme.secondaryText)

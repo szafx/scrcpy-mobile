@@ -50,7 +50,7 @@ final class DeviceDisplaySizeStore {
         var override: CGSize?
 
         for line in output.split(separator: "\n") {
-            let text = line.trimmingCharacters(in: .whitespaces)
+            let text = String(line).trimmingCharacters(in: .whitespaces)
             guard let colon = text.firstIndex(of: ":"),
                   let size = parseDimensions(String(text[text.index(after: colon)...])) else {
                 continue
@@ -68,8 +68,8 @@ final class DeviceDisplaySizeStore {
     private static func parseDimensions(_ text: String) -> CGSize? {
         let parts = text.trimmingCharacters(in: .whitespaces).split(separator: "x")
         guard parts.count == 2,
-              let width = Double(parts[0].trimmingCharacters(in: .whitespaces)),
-              let height = Double(parts[1].trimmingCharacters(in: .whitespaces)),
+              let width = Double(String(parts[0]).trimmingCharacters(in: .whitespaces)),
+              let height = Double(String(parts[1]).trimmingCharacters(in: .whitespaces)),
               width > 0, height > 0 else {
             return nil
         }

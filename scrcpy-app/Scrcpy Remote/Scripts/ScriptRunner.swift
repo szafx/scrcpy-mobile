@@ -100,13 +100,13 @@ final class ScriptRunner: ObservableObject {
         }
 
         guard AdbToolService.shared.isReady else {
-            fail(.notConnected)
+            fail(ScriptRunError.notConnected)
             return
         }
 
         let enabledSteps = script.steps.filter { $0.enabled }
         guard !enabledSteps.isEmpty else {
-            fail(.noSteps)
+            fail(ScriptRunError.noSteps)
             return
         }
 

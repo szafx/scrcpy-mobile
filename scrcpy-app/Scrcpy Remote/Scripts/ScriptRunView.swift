@@ -125,10 +125,10 @@ struct ScriptRunView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(runner.logs.enumerated()), id: \.offset) { index, line in
-                            Text(line)
+                        ForEach(runner.logs.indices, id: \.self) { index in
+                            Text(runner.logs[index])
                                 .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(index == runner.logs.count - 1 ? .primary : Theme.secondaryText)
+                                .foregroundColor(index == runner.logs.count - 1 ? Color.primary : Theme.secondaryText)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         Color.clear.frame(height: 1).id("bottom")
