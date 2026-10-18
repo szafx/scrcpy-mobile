@@ -475,19 +475,8 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
     [[self activeWindow] addGestureRecognizer:dismissTapGesture];
 }
 
-/// 拖动/点击手势只吃空白区域 —— 点在快捷条按钮上时交还给 UIControl，
-/// 否则拖动会把按钮点击吞掉（用户会感觉「按了没反应」）。
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    UIView *view = touch.view;
-    while (view) {
-        if ([view isKindOfClass:[UIControl class]]) {
-            return NO;
-        }
-        view = view.superview;
-    }
-    return YES;
-}
-
+/// 拖动/点击手势只吃空白区域 —— 点按钮时交还给 UIControl。
+/// ★ 实际实现放在 ScrcpyMenuView+VNCGestures.m（category 会覆盖本类的同名方法）。
 - (void)handleTap:(UITapGestureRecognizer *)gesture {
     [self toggleMenuExpansion];
 }

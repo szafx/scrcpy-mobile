@@ -147,6 +147,14 @@ struct MainContentView: View {
             return false
         }
 
+        // ★ 投屏已收起 → 用户要的是标签页，绝不能再把连接浮层盖在上头。
+        //   ADB 路径永远不发 SDLWindowAppeared(7)，下面那条 <7 的判据在连上之后
+        //   仍然是 true，收起投屏时这块浮层就会冒出来挡住 Devices/Console/Settings
+        //   （2026-10-18 用户实测「收起后去不了控制台」）。
+        if connectionManager.isStreamCollapsed {
+            return false
+        }
+
         // ★ 自动重连期间**必须**显示连接界面。
         //
         //   断连那一瞬间 connectionStatus 是 Disconnected，而下面那条
@@ -162,13 +170,13 @@ struct MainContentView: View {
         // 只有在以下情况下才显示 ConnectionStatusView：
         // 1. 正在连接中
         // 2. 连接失败（等待用户主动点击 dismiss 按钮）
-        // 3. 有当前会话且状态处于连接过程中（不包括连接失败）
+        // 3. 有当前会话且还没真正连上（到 Connected 就收掉；ADB 不发 SDLWindowAppeared）
         return connectionManager.isConnecting ||
                (connectionManager.connectionStatus == ScrcpyStatusConnectingFailed && currentStatusMessage != nil) ||
                (connectionManager.currentSession != nil &&
                 connectionManager.connectionStatus != ScrcpyStatusDisconnected &&
                 connectionManager.connectionStatus != ScrcpyStatusConnectingFailed &&
-                connectionManager.connectionStatus.rawValue < ScrcpyStatusSDLWindowAppeared.rawValue)
+                connectionManager.connectionStatus.rawValue < ScrcpyStatusConnected.rawValue)
     }
 
     /// 顶部横幅里显示的设备名（会话名为空时退回地址）

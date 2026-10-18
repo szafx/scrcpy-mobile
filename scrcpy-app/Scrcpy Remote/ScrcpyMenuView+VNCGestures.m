@@ -733,6 +733,16 @@
     LOG_POSITION(@"🐆 [ScrcpyMenuView] shouldReceiveTouch - gesture: %@, isDragging: %@, isScrolling: %@, deviceType: %ld",
                  gestureRecognizer.class, self.isDragging ? @"YES" : @"NO", self.isScrolling ? @"YES" : @"NO", (long)self.currentDeviceType);
 
+    // ★ 常驻快捷条上的按钮：触摸交给 UIControl，别被拖动/点击手势吞掉。
+    //   注意 category 方法会覆盖 ScrcpyMenuView.m 里的同名实现，所以判断必须放这里。
+    UIView *hitView = touch.view;
+    while (hitView) {
+        if ([hitView isKindOfClass:[UIControl class]]) {
+            return NO;
+        }
+        hitView = hitView.superview;
+    }
+
     // Block tap gestures during drag or scroll
     if (self.isDragging || self.isScrolling) {
         if (gestureRecognizer == self.vncTapGesture || gestureRecognizer == self.vncTwoFingerTapGesture) {
