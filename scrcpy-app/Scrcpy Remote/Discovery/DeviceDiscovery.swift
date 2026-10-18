@@ -364,6 +364,10 @@ final class DeviceDiscovery: ObservableObject {
     /// 公司网等够不到家里 v6 的场景 frps 必空，但 tailnet（走 IPv4/DERP）照样能用。
     var extraProxyNames: [String] = []
 
+    /// netmap 给出的各 peer 在线标记（每轮 mergeTailnetPeers 刷新）——
+    /// TS 探针的预筛：已知离线的 peer 不真拨、直接判灰。
+    private var peerOnlineByName: [String: Bool] = [:]
+
     /// tailnet 探针结果（按 proxy 名小写存）——「已保存会话」行取灯用
     @Published private(set) var sessionTailnetOnline: [String: Bool] = [:]
 
@@ -404,19 +408,38 @@ final class DeviceDiscovery: ObservableObject {
         //   · frps 来源的行：拼 MagicDNS 全名拨（本端状态里能解析成 100.x，见 TsnetProbe）
         //   · 已保存会话的身份：不在上面的补进来
         var dialHostByKey: [String: String] = [:]
+        var knownOfflineKeys: Set<String> = []
         for dev in devices {
             if let n = dev.tailnetName, !n.isEmpty {
-                dialHostByKey[n] = dev.tailnetHost ?? "\(n).\(suffix)"
+                if peerOnlineByName[n] == false {
+                    knownOfflineKeys.insert(n)          // netmap 已判离线：不拨，直接灰
+                } else {
+                    dialHostByKey[n] = dev.tailnetHost ?? "\(n).\(suffix)"
+                }
             } else if let p = dev.frpProxyName, !p.isEmpty {
                 let k = p.lowercased()
-                dialHostByKey[k] = "\(k).\(suffix)"
+                if peerOnlineByName[k] == false {
+                    knownOfflineKeys.insert(k)
+                } else {
+                    dialHostByKey[k] = "\(k).\(suffix)"
+                }
             }
         }
         for p in extraProxyNames {
             let t = p.trimmingCharacters(in: .whitespaces).lowercased()
-            if !t.isEmpty, dialHostByKey[t] == nil { dialHostByKey[t] = "\(t).\(suffix)" }
+            guard !t.isEmpty, dialHostByKey[t] == nil, !knownOfflineKeys.contains(t) else { continue }
+            if peerOnlineByName[t] == false {
+                knownOfflineKeys.insert(t)
+            } else {
+                dialHostByKey[t] = "\(t).\(suffix)"
+            }
         }
-        guard !dialHostByKey.isEmpty else { return }
+        // ★ 预筛（2026-10-18）：netmap 已判离线的 peer 不再真拨 —— 以前每个离线候选
+        //   都要把 2.5s 探针超时耗满，8 秒一轮的轻刷新里白烧时间；全离线时本轮直接收工。
+        if dialHostByKey.isEmpty {
+            for i in devices.indices { devices[i].tailnetOnline = false }
+            return
+        }
 
         let targets = Array(dialHostByKey)
         let results = await withTaskGroup(of: (String, Bool).self) { group -> [(String, Bool)] in
@@ -444,11 +467,15 @@ final class DeviceDiscovery: ObservableObject {
         sessionTailnetOnline = onlineByName
         for i in devices.indices {
             let key = devices[i].tailnetName ?? devices[i].frpProxyName?.lowercased()
-            if let k = key, let ok = onlineByName[k] {
-                devices[i].tailnetOnline = ok
+            if let k = key {
+                if let ok = onlineByName[k] {
+                    devices[i].tailnetOnline = ok
+                } else if knownOfflineKeys.contains(k) {
+                    devices[i].tailnetOnline = false
+                }
             }
         }
-        print("[DeviceDiscovery] TS 探针：\(targets.count) 台，在线 \(hits) 台")
+        print("[DeviceDiscovery] TS 探针：\(targets.count) 台（netmap 判离线跳过 \(knownOfflineKeys.count)），在线 \(hits) 台")
     }
 
     /// 把 tailnet netmap 里的被控手机并进设备列表 —— 「扫描」的第三个发现源。
@@ -465,6 +492,11 @@ final class DeviceDiscovery: ObservableObject {
             DispatchQueue.global(qos: .utility).async {
                 cont.resume(returning: TailscaleManager.shared.listPeers())
             }
+        }
+        // 记录 netmap 在线标记（无论有没有 phone-* 节点都要更新/清空）
+        peerOnlineByName = [:]
+        for peer in peers {
+            peerOnlineByName[peer.hostName.lowercased()] = peer.online
         }
         guard !peers.isEmpty else { return }
 
@@ -609,6 +641,25 @@ final class DeviceDiscovery: ObservableObject {
     // MARK: - frps 在线名单
 
     /// 返回（发现的设备, 错误说明）。纯数据进出，错误由调用方贴到界面上。
+    /// 拉一个 frps 管理接口 JSON（Basic 认证）；URL 为空或失败返回 nil。
+    private static func fetchFrpJSON(_ url: URL?, credential: String, timeout: TimeInterval = 12) async -> [String: Any]? {
+        guard let url else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("Basic \(credential)", forHTTPHeaderField: "Authorization")
+        return await withCheckedContinuation { continuation in
+            URLSession.shared.dataTask(with: request) { data, _, error in
+                guard let data, error == nil,
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: object)
+            }.resume()
+        }
+    }
+
     private static func fetchFrpOnline() async -> ([DiscoveredDevice], String?) {
         let settings = FrpSettings.load()
         guard !settings.serverAddr.isEmpty else {
@@ -622,22 +673,13 @@ final class DeviceDiscovery: ObservableObject {
             return ([], "bad frps address")
         }
 
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 12
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         let credential = Data("\(settings.adminUser):\(settings.adminPass)".utf8).base64EncodedString()
-        request.setValue("Basic \(credential)", forHTTPHeaderField: "Authorization")
-
-        let json: [String: Any]? = await withCheckedContinuation { continuation in
-            URLSession.shared.dataTask(with: request) { data, _, error in
-                guard let data, error == nil,
-                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                continuation.resume(returning: object)
-            }.resume()
-        }
+        // ★ 两张名单（xtcp / tcp）**并行**拉（2026-10-18）—— 以前串行，白等一个 RTT；
+        //   frps 在海外/蜂窝环境时，省下的就是实打实的几百毫秒。
+        let urlTcp = URL(string: "http://\(settings.serverAddr):\(settings.adminPort)/api/proxy/tcp")
+        async let tcpFetch: [String: Any]? = Self.fetchFrpJSON(urlTcp, credential: credential)
+        let json: [String: Any]? = await Self.fetchFrpJSON(url, credential: credential)
+        let jsonTcp: [String: Any]? = await tcpFetch
 
         guard let json, let proxies = json["proxies"] as? [[String: Any]] else {
             return ([], "frps admin unreachable")
@@ -666,31 +708,13 @@ final class DeviceDiscovery: ObservableObject {
         // 再拉一次 tcp 名单：中转端口（remotePort）在那边 —— 「家里 IPv6 中转」灯要用。
         // 失败也不影响主流程（只是中转灯不亮）。
         var relayPorts: [String: Int] = [:]   // proxy 基名（phone-xxx）→ remotePort
-        if let urlTcp = URL(string: "http://\(settings.serverAddr):\(settings.adminPort)/api/proxy/tcp") {
-            var reqTcp = URLRequest(url: urlTcp)
-            reqTcp.timeoutInterval = 12
-            reqTcp.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            reqTcp.setValue("Basic \(credential)", forHTTPHeaderField: "Authorization")
-
-            let jsonTcp: [String: Any]? = await withCheckedContinuation { continuation in
-                URLSession.shared.dataTask(with: reqTcp) { data, _, error in
-                    guard let data, error == nil,
-                          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    continuation.resume(returning: object)
-                }.resume()
-            }
-
-            if let proxiesTcp = jsonTcp?["proxies"] as? [[String: Any]] {
-                for proxy in proxiesTcp {
-                    guard let name = proxy["name"] as? String, name.hasSuffix("-tcp") else { continue }
-                    let base = String(name.dropLast(4))
-                    if let conf = proxy["conf"] as? [String: Any],
-                       let rp = conf["remotePort"] as? Int {
-                        relayPorts[base] = rp
-                    }
+        if let proxiesTcp = jsonTcp?["proxies"] as? [[String: Any]] {
+            for proxy in proxiesTcp {
+                guard let name = proxy["name"] as? String, name.hasSuffix("-tcp") else { continue }
+                let base = String(name.dropLast(4))
+                if let conf = proxy["conf"] as? [String: Any],
+                   let rp = conf["remotePort"] as? Int {
+                    relayPorts[base] = rp
                 }
             }
         }
