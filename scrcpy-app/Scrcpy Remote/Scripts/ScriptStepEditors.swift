@@ -13,7 +13,7 @@ struct ScriptStepEditorView: View {
 
     @Binding var step: ScriptStep
 
-    @State private var pickTarget: CoordinateTarget?
+    @State private var pickMode: CoordinatePickMode?
     @State private var showTemplateCrop = false
     @State private var templatePreview: UIImage?
     @State private var testMessage: String?
@@ -59,15 +59,13 @@ struct ScriptStepEditorView: View {
         }
         .navigationTitle(step.type.title)
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(item: $pickTarget) { target in
-            CoordinatePickerView { point in
-                switch target {
-                case .start:
-                    step.x1 = point.x
-                    step.y1 = point.y
-                case .end:
-                    step.x2 = point.x
-                    step.y2 = point.y
+        .sheet(item: $pickMode) { mode in
+            CoordinatePickerView(mode: mode) { start, end in
+                step.x1 = start.x
+                step.y1 = start.y
+                if mode == .swipe, let end {
+                    step.x2 = end.x
+                    step.y2 = end.y
                 }
             }
         }
@@ -92,12 +90,6 @@ struct ScriptStepEditorView: View {
     }
 
     // MARK: - 坐标
-
-    private enum CoordinateTarget: String, Identifiable {
-        case start
-        case end
-        var id: String { rawValue }
-    }
 
     @ViewBuilder
     private func coordinateSection(points: Int) -> some View {
@@ -143,17 +135,10 @@ struct ScriptStepEditorView: View {
             }
 
             Button {
-                pickTarget = .start
+                pickMode = points > 1 ? .swipe : .single
             } label: {
-                Label(points > 1 ? "截屏点选起点" : "截屏点选坐标", systemImage: "camera.viewfinder")
-            }
-
-            if points > 1 {
-                Button {
-                    pickTarget = .end
-                } label: {
-                    Label("截屏点选终点", systemImage: "camera.viewfinder")
-                }
+                Label(points > 1 ? "截屏框选滑动（起点 → 终点）" : "截屏点选坐标（十字准星）",
+                      systemImage: "camera.viewfinder")
             }
         } header: {
             Text("坐标（屏幕百分比）")
@@ -365,70 +350,108 @@ struct ScriptStepEditorView: View {
     }
 }
 
-// MARK: - 截屏点选坐标
+// MARK: - 截屏点选坐标（十字准星，拖动取点）
+
+enum CoordinatePickMode: String, Identifiable {
+    case single
+    case swipe
+    var id: String { rawValue }
+}
 
 struct CoordinatePickerView: View {
 
-    var onPick: (CGPoint) -> Void
+    let mode: CoordinatePickMode
+    /// single: (point, nil)；swipe: (start, end)
+    var onPick: (CGPoint, CGPoint?) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var image: UIImage?
     @State private var isLoading = true
-    @State private var picked: CGPoint?
     @State private var errorText: String?
+
+    @State private var startPoint: CGPoint?
+    @State private var endPoint: CGPoint?
 
     var body: some View {
         NavigationView {
-            GeometryReader { geometry in
-                ZStack {
-                    Color.black.opacity(0.92).ignoresSafeArea()
+            VStack(spacing: 0) {
+                GeometryReader { geometry in
+                    ZStack {
+                        Color.black.opacity(0.92).ignoresSafeArea()
 
-                    if let image {
-                        let fitted = fittedRect(imageSize: image.size, in: geometry.size)
+                        if let image {
+                            let fitted = fittedRect(imageSize: image.size, in: geometry.size)
 
-                        Image(uiImage: image)
-                            .resizable()
-                            .frame(width: fitted.width, height: fitted.height)
-                            .offset(x: fitted.minX, y: fitted.minY)
+                            Image(uiImage: image)
+                                .resizable()
+                                .frame(width: fitted.width, height: fitted.height)
+                                .offset(x: fitted.minX, y: fitted.minY)
 
-                        Color.clear
-                            .frame(width: fitted.width, height: fitted.height)
-                            .offset(x: fitted.minX, y: fitted.minY)
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 0)
-                                    .onEnded { value in
-                                        picked = CGPoint(
-                                            x: min(1, max(0, value.location.x / fitted.width)),
-                                            y: min(1, max(0, value.location.y / fitted.height))
-                                        )
-                                    }
-                            )
-
-                        if let point = picked {
-                            Circle()
-                                .fill(Color.green)
-                                .frame(width: 22, height: 22)
-                                .overlay(Circle().stroke(Color.white, lineWidth: 2))
-                                .offset(x: fitted.minX + point.x * fitted.width - 11,
-                                        y: fitted.minY + point.y * fitted.height - 11)
-                                .allowsHitTesting(false)
-                        }
-                    } else if isLoading {
-                        ProgressView().tint(.white)
-                    } else {
-                        VStack(spacing: 12) {
-                            Text(errorText ?? "截屏失败")
-                                .foregroundColor(.white)
-                            Button("重新截屏") {
-                                Task { await capture() }
+                            // 十字准星（跟着当前取的点走）
+                            if let active = activePoint {
+                                Rectangle()
+                                    .fill(Color.green.opacity(0.9))
+                                    .frame(width: 1.5, height: fitted.height)
+                                    .position(x: fitted.minX + active.x * fitted.width, y: fitted.midY)
+                                    .allowsHitTesting(false)
+                                Rectangle()
+                                    .fill(Color.green.opacity(0.9))
+                                    .frame(width: fitted.width, height: 1.5)
+                                    .position(x: fitted.midX, y: fitted.minY + active.y * fitted.height)
+                                    .allowsHitTesting(false)
                             }
-                            .buttonStyle(.borderedProminent)
+
+                            // 滑动路线
+                            if mode == .swipe, let s = startPoint, let e = endPoint {
+                                Path { path in
+                                    path.move(to: CGPoint(x: fitted.minX + s.x * fitted.width,
+                                                          y: fitted.minY + s.y * fitted.height))
+                                    path.addLine(to: CGPoint(x: fitted.minX + e.x * fitted.width,
+                                                             y: fitted.minY + e.y * fitted.height))
+                                }
+                                .stroke(Color.green, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                                .allowsHitTesting(false)
+                            }
+
+                            if let s = startPoint {
+                                marker(at: s, fitted: fitted, label: mode == .swipe ? "起" : "")
+                            }
+                            if mode == .swipe, let e = endPoint {
+                                marker(at: e, fitted: fitted, label: "终")
+                            }
+
+                            // 拖动层：拖到哪，坐标就取到哪
+                            Color.clear
+                                .frame(width: fitted.width, height: fitted.height)
+                                .offset(x: fitted.minX, y: fitted.minY)
+                                .contentShape(Rectangle())
+                                .gesture(
+                                    DragGesture(minimumDistance: 0)
+                                        .onChanged { value in
+                                            apply(value, fittedSize: fitted.size)
+                                        }
+                                        .onEnded { value in
+                                            apply(value, fittedSize: fitted.size)
+                                        }
+                                )
+                        } else if isLoading {
+                            ProgressView().tint(.white)
+                        } else {
+                            VStack(spacing: 12) {
+                                Text(errorText ?? "截屏失败")
+                                    .foregroundColor(.white)
+                                Button("重新截屏") {
+                                    Task { await capture() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
                         }
                     }
                 }
+
+                coordinateFooter
             }
-            .navigationTitle("点选坐标")
+            .navigationTitle(mode == .swipe ? "框选滑动" : "点选坐标")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -436,21 +459,101 @@ struct CoordinatePickerView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("确认") {
-                        if let point = picked {
-                            onPick(point)
-                            dismiss()
-                        }
+                        guard let start = startPoint else { return }
+                        if mode == .swipe, endPoint == nil { return }
+                        onPick(start, mode == .swipe ? endPoint : nil)
+                        dismiss()
                     }
-                    .disabled(picked == nil)
+                    .disabled(startPoint == nil || (mode == .swipe && endPoint == nil))
                 }
             }
         }
         .task { await capture() }
     }
 
+    // MARK: - 内部
+
+    private var activePoint: CGPoint? {
+        if mode == .swipe {
+            return endPoint ?? startPoint
+        }
+        return startPoint
+    }
+
+    private func apply(_ value: DragGesture.Value, fittedSize: CGSize) {
+        let current = normalize(value.location, in: fittedSize)
+        if mode == .single {
+            startPoint = current
+        } else {
+            startPoint = normalize(value.startLocation, in: fittedSize)
+            endPoint = current
+        }
+    }
+
+    private func normalize(_ location: CGPoint, in size: CGSize) -> CGPoint {
+        guard size.width > 0, size.height > 0 else { return .zero }
+        return CGPoint(
+            x: min(1, max(0, location.x / size.width)),
+            y: min(1, max(0, location.y / size.height))
+        )
+    }
+
+    private func marker(at point: CGPoint, fitted: CGRect, label: String) -> some View {
+        ZStack {
+            Circle()
+                .fill(Color.green)
+                .frame(width: 24, height: 24)
+                .overlay(Circle().stroke(Color.white, lineWidth: 2))
+            if !label.isEmpty {
+                Text(label)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white)
+            }
+        }
+        .position(x: fitted.minX + point.x * fitted.width,
+                  y: fitted.minY + point.y * fitted.height)
+        .allowsHitTesting(false)
+    }
+
+    private var coordinateFooter: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let image {
+                if mode == .single, let point = startPoint {
+                    Text(String(format: "X %.1f%%  ·  Y %.1f%%  ·  (%d, %d) px",
+                                point.x * 100, point.y * 100,
+                                Int(point.x * image.size.width),
+                                Int(point.y * image.size.height)))
+                } else if mode == .swipe, let start = startPoint, let end = endPoint {
+                    Text(String(format: "起点 (%.1f%%, %.1f%%)  →  终点 (%.1f%%, %.1f%%)",
+                                start.x * 100, start.y * 100, end.x * 100, end.y * 100))
+                    Text(String(format: "像素：(%d, %d) → (%d, %d)",
+                                Int(start.x * image.size.width), Int(start.y * image.size.height),
+                                Int(end.x * image.size.width), Int(end.y * image.size.height)))
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundColor(Theme.secondaryText)
+                } else {
+                    Text(mode == .swipe ? "在画面上拖动：起点 → 终点" : "在画面上拖动十字准星取点")
+                        .foregroundColor(Theme.secondaryText)
+                }
+
+                Text("画面分辨率 \(Int(image.size.width))×\(Int(image.size.height))")
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundColor(Theme.secondaryText)
+            }
+        }
+        .font(.system(size: 14, weight: .semibold))
+        .foregroundColor(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.65))
+    }
+
     private func capture() async {
         isLoading = true
         errorText = nil
+        startPoint = nil
+        endPoint = nil
         image = await ScreenshotService.capture()
         isLoading = false
         if image == nil {
