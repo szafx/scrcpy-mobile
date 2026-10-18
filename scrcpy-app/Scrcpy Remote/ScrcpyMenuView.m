@@ -21,13 +21,13 @@
 // Capsule View Constants（仅 VNC 的初始宽度还用到）
 static const CGFloat kCapsuleWidth = 55.0f;
 
-// 常驻快捷条（ADB 用，2026-10-18）
-static const CGFloat kQuickBarHeight = 40.0f;
-static const CGFloat kQuickBarButtonSize = 34.0f;
-static const CGFloat kQuickBarButtonSpacing = 2.0f;
-static const CGFloat kQuickBarPadding = 3.0f;
-static const CGFloat kQuickBarCornerRadius = 20.0f;
-static const CGFloat kQuickBarAlphaIdle = 0.45f;
+// 常驻底部控制栏（2026-10-18 用户定稿：整条固定在最下面、铺满宽度）
+static const CGFloat kQuickBarHeight = 56.0f;       // 按钮区高度（下方另加安全区）
+static const CGFloat kQuickBarButtonSize = 44.0f;   // 按钮可点区域（比原来的 34 大）
+static const CGFloat kQuickBarButtonSpacing = 0.0f;
+static const CGFloat kQuickBarPadding = 2.0f;
+static const CGFloat kQuickBarCornerRadius = 18.0f; // 只圆上面两个角
+static const CGFloat kQuickBarAlphaIdle = 1.0f;
 static const CGFloat kQuickBarAlphaNormal = 1.0f;
 static const NSTimeInterval kKeyRepeatInterval = 0.18;
 
@@ -439,7 +439,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 - (UIButton *)createQuickBarButtonWithIcon:(NSString *)iconName {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     UIImageConfiguration *configuration =
-        [UIImageSymbolConfiguration configurationWithPointSize:15
+        [UIImageSymbolConfiguration configurationWithPointSize:19
                                                         weight:UIImageSymbolWeightSemibold];
     UIImage *icon = [UIImage systemImageNamed:iconName withConfiguration:configuration];
     [button setImage:icon forState:UIControlStateNormal];
@@ -458,17 +458,12 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 #pragma mark - Setup Gestures
 
 - (void)setupGestures {
+    // 底部控制栏固定不动：不再支持拖动（2026-10-18 用户定稿）
     UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
     tapGesture.cancelsTouchesInView = YES;
     tapGesture.delaysTouchesEnded = YES;
     tapGesture.delegate = self;
     [self.capsuleView addGestureRecognizer:tapGesture];
-
-    UIPanGestureRecognizer *panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-    panGesture.cancelsTouchesInView = YES;
-    panGesture.delaysTouchesEnded = YES;
-    panGesture.delegate = self;
-    [self.capsuleView addGestureRecognizer:panGesture];
 
     UITapGestureRecognizer *dismissTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDismissTap:)];
     dismissTapGesture.cancelsTouchesInView = YES;
@@ -684,11 +679,8 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 }
 
 - (void)fadeCapsule {
-    if (!self.isExpanded) {
-        [UIView animateWithDuration:kAnimationDuration animations:^{
-            self.capsuleView.alpha = kQuickBarAlphaIdle;
-        }];
-    }
+    // 固定底部栏不淡化（用户定稿：控制按钮常驻可见）
+    self.capsuleView.alpha = kQuickBarAlphaNormal;
 }
 
 #pragma mark - Button Actions
@@ -861,9 +853,10 @@ static __weak UIWindow *gLastSDLWindow = nil;
     self.maskView.delegate = self;
 
     self.capsuleBackgroundView.alpha = 1.0;
-    self.capsuleView.alpha = kQuickBarAlphaIdle;
+    self.capsuleView.alpha = kQuickBarAlphaNormal;
 
     [window addSubview:self];
+    [window bringSubviewToFront:self];
 }
 
 - (void)updateLayout {
@@ -873,7 +866,6 @@ static __weak UIWindow *gLastSDLWindow = nil;
     LOG_POSITION(@"updateLayout called");
 
     [self updateQuickBarLayout];
-    [self updatePositionFromRatio];
 
     if (self.isExpanded) {
         [self updateMenuPosition];
@@ -897,20 +889,30 @@ static __weak UIWindow *gLastSDLWindow = nil;
     return buttons;
 }
 
-/// 按可见按钮重排快捷条尺寸与按钮位置（宽度变化时整体重算）
+/// 按可见按钮重排：整条铺满屏幕宽度、固定在底部，按钮均分（2026-10-18 用户定稿）
 - (void)updateQuickBarLayout {
     if (!self.capsuleView || !self.capsuleBackgroundView) return;
+    UIWindow *window = [self activeWindow];
+    if (!window) return;
+
+    CGFloat safeBottom = 0;
+    if (@available(iOS 11.0, *)) {
+        safeBottom = window.safeAreaInsets.bottom;
+    }
+    CGFloat barHeight = kQuickBarHeight + safeBottom;
+    CGFloat width = window.bounds.size.width;
 
     NSArray<UIButton *> *buttons = [self visibleQuickButtons];
-    NSInteger count = (NSInteger)buttons.count;
-    CGFloat width = kQuickBarPadding * 2 + count * kQuickBarButtonSize
-                  + (count > 1 ? (count - 1) * kQuickBarButtonSpacing : 0);
-    width = MAX(width, 40.0f);
-    CGFloat height = kQuickBarHeight;
+    NSInteger count = MAX(1, (NSInteger)buttons.count);
+    CGFloat slot = width / (CGFloat)count;
+    CGFloat buttonSize = MIN(kQuickBarButtonSize, MAX(36.0f, slot - 4.0f));
 
-    self.capsuleView.frame = CGRectMake(0, 0, width, height);
+    self.capsuleView.frame = CGRectMake(0, 0, width, barHeight);
     self.capsuleBackgroundView.frame = self.capsuleView.bounds;
-    self.capsuleBackgroundView.layer.cornerRadius = MIN(kQuickBarCornerRadius, height / 2.0);
+    self.capsuleBackgroundView.layer.cornerRadius = kQuickBarCornerRadius;
+    if (@available(iOS 11.0, *)) {
+        self.capsuleBackgroundView.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
+    }
 
     for (CALayer *layer in self.capsuleBackgroundView.layer.sublayers) {
         if ([layer isKindOfClass:[CAGradientLayer class]]) {
@@ -919,14 +921,14 @@ static __weak UIWindow *gLastSDLWindow = nil;
         }
     }
 
-    CGFloat x = kQuickBarPadding;
-    for (UIButton *button in buttons) {
-        button.frame = CGRectMake(x, (height - kQuickBarButtonSize) / 2.0,
-                                  kQuickBarButtonSize, kQuickBarButtonSize);
-        x += kQuickBarButtonSize + kQuickBarButtonSpacing;
+    for (NSInteger i = 0; i < (NSInteger)buttons.count; i++) {
+        UIButton *button = buttons[i];
+        CGFloat centerX = slot * (i + 0.5f);
+        CGFloat y = (kQuickBarHeight - buttonSize) / 2.0f;
+        button.frame = CGRectMake(centerX - buttonSize / 2.0f, y, buttonSize, buttonSize);
     }
 
-    self.frame = CGRectMake(self.frame.origin.x, self.frame.origin.y, width, height);
+    self.frame = CGRectMake(0, window.bounds.size.height - barHeight, width, barHeight);
 }
 
 - (void)restoreQuickBarAlpha {

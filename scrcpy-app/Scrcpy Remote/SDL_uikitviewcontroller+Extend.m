@@ -383,11 +383,26 @@ static char orientationLockEnabledKey;
     // Check if there's already a known remote orientation (frame arrived before viewDidAppear)
     // Apply it now since we missed the notification
     [self applyPendingRemoteOrientation];
+
+    // 底部固定控制栏：把投屏内容区让出来（按钮区在窗口底部）
+    [self applyMirrorBottomInset];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleOrientationChangeForInset:)
+                                                 name:UIDeviceOrientationDidChangeNotification
+                                               object:nil];
+}
+
+- (void)handleOrientationChangeForInset:(NSNotification *)notification {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self applyMirrorBottomInset];
+    });
 }
 
 #pragma mark - Foreground Re-activation
 
 - (void)handleAppDidBecomeActive:(NSNotification *)notification {
+    [self applyMirrorBottomInset];
     [self forceResyncSDLWindowSizeAfterForeground];
 }
 
@@ -399,6 +414,7 @@ static char orientationLockEnabledKey;
             return;
         }
     }
+    [self applyMirrorBottomInset];
     [self forceResyncSDLWindowSizeAfterForeground];
 }
 
@@ -410,6 +426,35 @@ static char orientationLockEnabledKey;
     [self.view layoutIfNeeded];
     [self notifySDLWindowSizeChangeForced:YES];
     [self updateDisplayLayerFrame];
+}
+
+/// 把投屏内容区缩到「屏幕高度 − 底部控制栏」，控制栏本身由 ScrcpyMenuView
+/// 固定在窗口最底部（2026-10-18 用户定稿：按钮常驻、铺满宽度、画面在上方）。
+- (void)applyMirrorBottomInset {
+    UIWindow *window = self.view.window;
+    if (!window || window.hidden) return;
+
+    CGFloat safeBottom = 0;
+    if (@available(iOS 11.0, *)) {
+        safeBottom = window.safeAreaInsets.bottom;
+    }
+    CGFloat barHeight = 56.0 + safeBottom;
+    CGRect windowBounds = window.bounds;
+    CGRect target = CGRectMake(0, 0,
+                               windowBounds.size.width,
+                               MAX(1.0, windowBounds.size.height - barHeight));
+
+    // 只跟随宽度，不跟随高度 —— 否则 UIKit 会把根视图重新拉满整屏
+    self.view.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    if (!CGRectEqualToRect(CGRectIntegral(self.view.frame), CGRectIntegral(target))) {
+        self.view.frame = target;
+        [self notifySDLWindowSizeChangeForced:YES];
+        NSLog(@"🪟 [MirrorInset] 投屏区域 → %@（底部控制栏 %.0fpt）",
+              NSStringFromCGRect(target), barHeight);
+    }
+
+    [self.menuView updateLayout];
 }
 
 -(void)applyPendingRemoteOrientation {
@@ -824,6 +869,7 @@ static char orientationLockEnabledKey;
 
     // 等一次 runloop，让布局稳定后再重同步 SDL 尺寸（防触摸坐标漂移）
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self applyMirrorBottomInset];
         [self forceResyncSDLWindowSizeAfterForeground];
         [self.menuView updateLayout];
         NSLog(@"🪟 [Restore] 投屏已恢复");
