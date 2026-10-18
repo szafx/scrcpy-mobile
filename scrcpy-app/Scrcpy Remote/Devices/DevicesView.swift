@@ -299,7 +299,10 @@ struct DevicesView: View {
             if let match { usedDiscoveryIds.insert(match.id) }
             rows.append(HomeRow(
                 id: "session-\(session.id.uuidString)",
-                title: session.title,
+                // 显示名优先级：**设备级备注 > 会话标题** —— 保存会话时标题就被定死了，
+                // 之后给设备改名（如「月嫂手机」）会话行不会跟着变，用户会以为改名没生效
+                // （2026-10-18 实测反馈）。
+                title: match.flatMap { discovery.customName(for: $0) } ?? session.title,
                 subtitle: "\(m.hostReal):\(m.port)",
                 status: statusText(for: session),
                 statusKind: statusKind(for: session),
