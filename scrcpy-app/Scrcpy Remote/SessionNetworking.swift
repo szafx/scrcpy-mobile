@@ -344,9 +344,24 @@ class SessionNetworking {
                                                returnCode: nil)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if out != "5555" {
-                print("[ADBHeal] 对端 5555 未开（=\(out.isEmpty ? "空" : out)）→ iPhone 经隧道执行 tcpip 5555")
-                _ = client.executeADBCommand(["-s", target, "tcpip", "5555"], returnCode: nil)
-                print("[ADBHeal] tcpip 5555 已发出（对端 adbd 会重启、隧道随之失效——正常）")
+                // ★ 2026-10-18 实测（OPPO Find X / Android 11）：
+                //   开着「无线调试」的手机本来就能走 TLS 端口（relay 动态目标）。
+                //   这时补 `tcpip 5555` 会把**明文 5555 打开**，relay 立刻改走 5555，
+                //   而 iPhone 的 key 通常只在无线调试里配对过 → 下次连接变成
+                //   "Please check and accept the adb authorization request"。
+                //   所以：无线调试已开就不要再补明文口，保持 TLS 通道。
+                let wifiEnabled = client.executeADBCommand(
+                    ["-s", target, "shell", "settings", "get", "global", "adb_wifi_enabled"],
+                    returnCode: nil
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if wifiEnabled == "1" {
+                    print("[ADBHeal] 无线调试已开（adb_wifi_enabled=1）→ 跳过 tcpip 5555，保持无线调试通道")
+                } else {
+                    print("[ADBHeal] 对端 5555 未开（=\(out.isEmpty ? "空" : out)）→ iPhone 经隧道执行 tcpip 5555")
+                    _ = client.executeADBCommand(["-s", target, "tcpip", "5555"], returnCode: nil)
+                    print("[ADBHeal] tcpip 5555 已发出（对端 adbd 会重启、隧道随之失效——正常）")
+                }
             }
             DispatchQueue.main.async {
                 _ = self?.stopAllForwarding()
