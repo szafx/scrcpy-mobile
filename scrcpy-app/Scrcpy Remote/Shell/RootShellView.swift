@@ -47,42 +47,43 @@ struct RootShellView: View {
     ]
 
     var body: some View {
-        Group {
-            switch selectedTab {
-            case 0:
-                NavContainer {
-                    DevicesView(
-                        savedSessions: $savedSessions,
-                        onConnectSession: onConnectSession,
-                        onDeleteSession: onDeleteSession,
-                        onEditSession: onEditSession,
-                        onDuplicateSession: onDuplicateSession,
-                        onCreateSession: onCreateSession,
-                        onOpenSettings: { selectedTab = 2 }
-                    )
-                }
-
-            case 1:
-                NavContainer {
-                    ConsoleView(
-                        savedSessions: $savedSessions,
-                        onConnectSession: onConnectSession
-                    )
-                }
-
-            default:
-                // SettingsView 自己带 NavigationView（SettingsView.swift:293），
-                // 不要再套一层。
-                SettingsView()
-
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 投屏收起后，三个标签页共用同一条「回到画面」细横幅
-        .safeAreaInset(edge: .top, spacing: 0) {
+        VStack(spacing: 0) {
+            // 投屏收起后，横幅**占一行**放在最上面，绝不盖住 Devices/Console 的头部
             if isStreamCollapsed, let name = streamingDeviceName {
                 StreamBanner(name: name, action: onReturnToStream)
             }
+
+            Group {
+                switch selectedTab {
+                case 0:
+                    NavContainer {
+                        DevicesView(
+                            savedSessions: $savedSessions,
+                            onConnectSession: onConnectSession,
+                            onDeleteSession: onDeleteSession,
+                            onEditSession: onEditSession,
+                            onDuplicateSession: onDuplicateSession,
+                            onCreateSession: onCreateSession,
+                            onOpenSettings: { selectedTab = 2 }
+                        )
+                    }
+
+                case 1:
+                    NavContainer {
+                        ConsoleView(
+                            savedSessions: $savedSessions,
+                            onConnectSession: onConnectSession
+                        )
+                    }
+
+                default:
+                    // SettingsView 自己带 NavigationView（SettingsView.swift:293），
+                    // 不要再套一层。
+                    SettingsView()
+
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         // 浮动胶囊浮在内容之上，同时把内容的安全区往上顶，
         // 免得列表最后一行被它盖住。
