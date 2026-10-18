@@ -15,6 +15,8 @@ struct Scrcpy_RemoteApp: App {
     @StateObject private var logManager = AppLogManager.shared
     @StateObject private var schemeManager = AppSchemeManagerV2.shared
     @StateObject private var updateManager = AppUpdateManager.shared
+    /// 冷启动图标动画开关键（背景与系统启动帧相同 → 无缝过渡）
+    @State private var showLaunchSplash = true
 
     init() {
         #if DEBUG
@@ -31,6 +33,7 @@ struct Scrcpy_RemoteApp: App {
 
     var body: some Scene {
         WindowGroup {
+            ZStack {
             MainContentView()
                 .environmentObject(appSettings)
                 .environmentObject(schemeManager)
@@ -98,6 +101,19 @@ struct Scrcpy_RemoteApp: App {
                 } message: {
                     Text("A new build (\(updateManager.availableBuild)) is available. Update now?")
                 }
+                if showLaunchSplash {
+                    LaunchSplashView()
+                        .transition(.opacity)
+                        .zIndex(100)
+                }
+            }
+            .onAppear {
+                // 冷启动图标动画：全屏渐变背景上，白色手机淡入 + 呼吸闪烁，
+                // 1.6 秒后淡出进主界面（背景与系统启动帧同图 → 无缝衔接）
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                    withAnimation(.easeOut(duration: 0.35)) { showLaunchSplash = false }
+                }
+            }
         }
     }
     
@@ -121,6 +137,41 @@ struct Scrcpy_RemoteApp: App {
             }
         } else {
             print("ℹ️ [App] Live Activities not available on this iOS version")
+        }
+    }
+}
+
+// MARK: - 冷启动动画
+/// 系统启动帧只显示**全屏渐变背景**（Launch Screen.storyboard 里的 LaunchBackdrop，
+/// 竖屏纵向渐变，scaleToFill 铺满任何机型）；App 起来后这里接上同一张背景，
+/// 白色手机**淡入 + 呼吸闪烁**，然后整体淡出进主界面 —— 无缝衔接。
+struct LaunchSplashView: View {
+    @State private var phoneVisible = false
+    @State private var pulse = false
+
+    var body: some View {
+        ZStack {
+            Image("LaunchBackdrop")
+                .resizable()
+                .scaledToFill()
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+                .clipped()
+                .ignoresSafeArea()
+
+            Image("AppLaunchGlyph")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 200, height: 200)
+                // 内层：呼吸闪烁（白色机身 1.0 ↔ 0.15）
+                .opacity(pulse ? 0.15 : 1.0)
+                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: pulse)
+                // 外层：出现（淡入）
+                .opacity(phoneVisible ? 1.0 : 0.0)
+                .animation(.easeIn(duration: 0.5), value: phoneVisible)
+        }
+        .onAppear {
+            phoneVisible = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { pulse = true }
         }
     }
 }
