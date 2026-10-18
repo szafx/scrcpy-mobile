@@ -76,21 +76,13 @@ struct RootShellView: View {
         // 浮动胶囊浮在内容之上，同时把内容的安全区往上顶，
         // 免得列表最后一行被它盖住。
         // 注意：VRLink 在工具子页里也照样显示这条 —— 所以这里不区分层级。
+        // ★ 只保留胶囊本身：外面那层整条渐变/卡片背景已去掉（用户 2026-10-18 指定
+        //   —— dock 后面不要那块透明方形卡片，直接让内容透上来）。
         .safeAreaInset(edge: .bottom, spacing: 0) {
             FloatingTabBar(selected: $selectedTab, tabs: tabs)
                 .padding(.top, 8)
                 .padding(.bottom, 4)
                 .padding(.horizontal, 24)
-                .background(
-                    // 让胶囊浮起来时底下有渐变兜底，滚动的文字不会直接顶到胶囊边缘
-                    LinearGradient(
-                        colors: [Theme.background.opacity(0), Theme.background],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .padding(.top, -12)
-                    .allowsHitTesting(false)
-                )
         }
         .background(Theme.background.ignoresSafeArea())
     }
