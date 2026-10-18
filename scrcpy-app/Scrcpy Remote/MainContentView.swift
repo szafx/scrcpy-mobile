@@ -170,19 +170,30 @@ struct MainContentView: View {
         // 只有在以下情况下才显示 ConnectionStatusView：
         // 1. 正在连接中
         // 2. 连接失败（等待用户主动点击 dismiss 按钮）
-        // 3. 有当前会话且还没真正连上（到 Connected 就收掉；ADB 不发 SDLWindowAppeared）
+        // 3. 有当前会话但投屏窗口还没建好（一旦 Window Created 就收掉）
         return connectionManager.isConnecting ||
                (connectionManager.connectionStatus == ScrcpyStatusConnectingFailed && currentStatusMessage != nil) ||
                (connectionManager.currentSession != nil &&
                 connectionManager.connectionStatus != ScrcpyStatusDisconnected &&
                 connectionManager.connectionStatus != ScrcpyStatusConnectingFailed &&
-                connectionManager.connectionStatus.rawValue < ScrcpyStatusConnected.rawValue)
+                !isMirrorReady)
     }
 
     /// 顶部横幅里显示的设备名（会话名为空时退回地址）
     private var streamingDeviceName: String? {
         guard let session = connectionManager.currentSession else { return nil }
         return session.sessionName.isEmpty ? session.hostReal : session.sessionName
+    }
+
+    /// 投屏窗口是否已经建立/可用 —— 一旦到 Window Created 就不该再显示连接浮层。
+    /// ★ 不能用 rawValue 比大小：枚举值不是时间顺序（Connecting=4 > WindowCreated=3）。
+    private var isMirrorReady: Bool {
+        switch connectionManager.connectionStatus {
+        case ScrcpyStatusSDLWindowCreated, ScrcpyStatusConnected, ScrcpyStatusSDLWindowAppeared:
+            return true
+        default:
+            return false
+        }
     }
 
     var body: some View {

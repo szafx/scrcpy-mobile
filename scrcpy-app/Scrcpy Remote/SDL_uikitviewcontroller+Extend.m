@@ -870,7 +870,9 @@ static char orientationLockEnabledKey;
     sdlWindow.hidden = NO;
     sdlWindow.alpha = 1.0;
     sdlWindow.userInteractionEnabled = YES;
-    [sdlWindow makeKeyWindow];
+    // makeKeyAndVisible —— 确保它重新盖在 SwiftUI 窗口之上（只 makeKeyWindow
+    // 在 alpha 方案下偶尔仍被主窗口压住，用户会看到连接浮层而不是画面）
+    [sdlWindow makeKeyAndVisible];
     [[SessionConnectionManager shared] setStreamCollapsed:NO];
 
     // 等一次 runloop，让布局稳定后再重同步 SDL 尺寸（防触摸坐标漂移）
