@@ -24,7 +24,6 @@ NS_ASSUME_NONNULL_BEGIN
 // UI Elements
 @property (nonatomic, strong) UIView *capsuleView;
 @property (nonatomic, strong) UIView *capsuleBackgroundView;
-@property (nonatomic, strong) UIImageView *capsuleHandleIcon;
 @property (nonatomic, strong) UIView *menuView;
 @property (nonatomic, strong) UIButton *backButton;
 @property (nonatomic, strong) UIButton *homeButton;
@@ -33,6 +32,20 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong) UIButton *actionsButton;
 @property (nonatomic, strong) UIButton *clipboardSyncButton;
 @property (nonatomic, strong) UIButton *disconnectButton;
+@property (nonatomic, strong) UIButton *collapseButton;
+
+// 常驻快捷条（2026-10-18）
+@property (nonatomic, strong) UIButton *quickBackButton;
+@property (nonatomic, strong) UIButton *quickHomeButton;
+@property (nonatomic, strong) UIButton *quickSwitchButton;
+@property (nonatomic, strong) UIButton *quickVolumeDownButton;
+@property (nonatomic, strong) UIButton *quickVolumeUpButton;
+@property (nonatomic, strong) UIButton *quickPowerButton;
+@property (nonatomic, strong) UIButton *quickRebootButton;
+@property (nonatomic, strong) UIButton *quickShutdownButton;
+@property (nonatomic, strong) UIButton *quickMoreButton;
+@property (nonatomic, strong, nullable) NSTimer *keyRepeatTimer;
+@property (nonatomic, assign) int repeatKeycode;
 
 // State
 @property (nonatomic, assign) BOOL isExpanded;
@@ -90,6 +103,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)updateMenuPosition;
 - (void)updateButtonLayout;
 - (void)toggleMenuExpansion;
+- (NSArray<UIButton *> *)visibleQuickButtons;
+- (void)updateQuickBarLayout;
+- (void)startKeyRepeat:(int)keycode;
+- (void)stopKeyRepeat;
 
 // Fit Device Window Size
 - (void)showFitDeviceWindowConfirmation;

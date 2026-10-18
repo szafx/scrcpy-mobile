@@ -20,6 +20,13 @@ typedef NS_ENUM(NSInteger, ScrcpyDeviceType) {
 - (void)didTapActionsButton;
 - (void)didTapDisconnectButton;
 
+// 投屏常驻快捷条（2026-10-18）
+/// 重启 / 关机需要二次确认，由控制器负责弹窗
+- (void)didTapRebootButton;
+- (void)didTapShutdownButton;
+/// 收起投屏窗口、回到 App 标签页（连接保持）
+- (void)didTapCollapseButton;
+
 // 新增：缩放相关的代理方法
 // VNC缩放代理方法（兼容旧版本）
 - (void)didPinchWithScale:(CGFloat)scale;

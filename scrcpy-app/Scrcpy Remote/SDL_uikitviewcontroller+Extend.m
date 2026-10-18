@@ -28,6 +28,9 @@ extern NSString * const ScrcpyRemoteOrientationChangedNotification;
 // Track last known window size for Stage Manager detection
 static CGSize g_lastKnownViewSize = {0, 0};
 
+// 投屏 SDL 窗口弱引用 —— 窗口 hidden 后 SDL_GetMouseFocus 可能取不到，恢复时靠它
+static __weak UIWindow *gSDLWindow = nil;
+
 @interface SDL_uikitviewcontroller () <ScrcpyMenuViewDelegate>
 // NOTE: homeIndicatorHidden is SDL3's own ivar; we drive it through
 // SDL_HINT_IOS_HIDE_HOME_INDICATOR rather than redeclaring it here.
@@ -275,6 +278,8 @@ static char orientationLockEnabledKey;
 {
     [super viewDidAppear:animated];
 
+    gSDLWindow = self.view.window;
+
     // Hide the home indicator (value 1) AND defer the system screen-edge
     // gestures (value 2) so a single bottom swipe is captured by scrcpy
     // instead of bouncing to the iOS home screen. SDL's hint callback
@@ -325,6 +330,16 @@ static char orientationLockEnabledKey;
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleDisconnectForOrientationReset:)
                                                  name:ScrcpyRequestDisconnectNotification
+                                               object:nil];
+
+    // 投屏窗口收起 / 恢复（2026-10-18）
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleRestoreStream:)
+                                                 name:kNotificationRestoreStreamRequest
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handlePowerCommandResult:)
+                                                 name:kNotificationDevicePowerResult
                                                object:nil];
 
     // 监听状态更新通知，检测断开连接状态
@@ -759,6 +774,117 @@ static char orientationLockEnabledKey;
 - (void)didTapDisconnectButton {
     // Post notification to disconnect
     [[NSNotificationCenter defaultCenter] postNotificationName:ScrcpyRequestDisconnectNotification object:nil];
+}
+
+#pragma mark - 收起投屏 / 恢复投屏（2026-10-18）
+
+/// 收起：把 SDL 投屏窗口藏起来、把 SwiftUI 主窗口切回前台。
+/// 窗口本身/rootVC/Metal layer 都还活着 → 会话、解码、控制通道全部继续。
+- (void)didTapCollapseButton {
+    SDL_StopTextInput(SDL_GetKeyboardFocus());
+
+    UIWindow *sdlWindow = self.view.window ?: gSDLWindow;
+    if (!sdlWindow) {
+        NSLog(@"🪟 [Collapse] 找不到 SDL 窗口，忽略");
+        return;
+    }
+    gSDLWindow = sdlWindow;
+
+    // 找同一个 scene 里的 SwiftUI 主窗口（LatencyBadgeWindow 是 normal+1，会被排除）
+    UIWindow *appWindow = nil;
+    for (UIWindow *w in sdlWindow.windowScene.windows) {
+        if (w == sdlWindow || w.isHidden) continue;
+        if (w.windowLevel != UIWindowLevelNormal) continue;
+        appWindow = w;
+        break;
+    }
+    if (!appWindow) {
+        NSLog(@"🪟 [Collapse] 找不到 SwiftUI 主窗口，忽略");
+        return;
+    }
+
+    sdlWindow.hidden = YES;
+    [appWindow makeKeyAndVisible];
+    [[SessionConnectionManager shared] setStreamCollapsed:YES];
+    NSLog(@"🪟 [Collapse] 投屏已收起（连接保持）");
+}
+
+/// 顶部横幅点击 → 恢复 SDL 窗口
+- (void)handleRestoreStream:(NSNotification *)notification {
+    UIWindow *sdlWindow = self.view.window ?: gSDLWindow;
+    if (!sdlWindow) {
+        NSLog(@"🪟 [Restore] 找不到 SDL 窗口，忽略");
+        return;
+    }
+    gSDLWindow = sdlWindow;
+
+    sdlWindow.hidden = NO;
+    [sdlWindow makeKeyWindow];
+    [[SessionConnectionManager shared] setStreamCollapsed:NO];
+
+    // 等一次 runloop，让布局稳定后再重同步 SDL 尺寸（防触摸坐标漂移）
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self forceResyncSDLWindowSizeAfterForeground];
+        [self.menuView updateLayout];
+        NSLog(@"🪟 [Restore] 投屏已恢复");
+    });
+}
+
+#pragma mark - 重启 / 关机（危险操作，先确认）
+
+- (void)didTapRebootButton {
+    [self confirmPowerCommand:@"reboot"
+                        title:NSLocalizedString(@"Restart device?", @"Restart confirm title")
+                      message:NSLocalizedString(@"The phone will reboot now and the connection will drop.", @"Restart confirm message")
+                  actionTitle:NSLocalizedString(@"Restart", @"Restart action")];
+}
+
+- (void)didTapShutdownButton {
+    [self confirmPowerCommand:@"reboot -p"
+                        title:NSLocalizedString(@"Power off device?", @"Power off confirm title")
+                      message:NSLocalizedString(@"The phone will shut down now and the connection will drop.", @"Power off confirm message")
+                  actionTitle:NSLocalizedString(@"Power Off", @"Power off action")];
+}
+
+- (void)confirmPowerCommand:(NSString *)command
+                      title:(NSString *)title
+                    message:(NSString *)message
+                actionTitle:(NSString *)actionTitle {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                       message:message
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"Cancel", @"Cancel")
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:actionTitle
+                                                  style:UIAlertActionStyleDestructive
+                                                handler:^(UIAlertAction *action) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:kNotificationDevicePowerCommand
+                                                                object:nil
+                                                              userInfo:@{kKeyPowerCommand: command}];
+        }]];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+/// Swift 侧执行失败时回传（成功则会话直接断开，不需要提示）
+- (void)handlePowerCommandResult:(NSNotification *)notification {
+    BOOL ok = [notification.userInfo[kKeyPowerOK] boolValue];
+    if (ok) return;
+
+    NSString *detail = notification.userInfo[kKeyPowerMessage];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:NSLocalizedString(@"Command failed", @"Power command failed title")
+                             message:(detail.length > 0 ? detail
+                                      : NSLocalizedString(@"The device did not accept the command.", @"Power command failed fallback"))
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"OK", @"OK")
+                                                  style:UIAlertActionStyleDefault
+                                                handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
 }
 
 #pragma mark - VNC Zoom Delegate Methods

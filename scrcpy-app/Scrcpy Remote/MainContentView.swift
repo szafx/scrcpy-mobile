@@ -171,6 +171,12 @@ struct MainContentView: View {
                 connectionManager.connectionStatus.rawValue < ScrcpyStatusSDLWindowAppeared.rawValue)
     }
 
+    /// 顶部横幅里显示的设备名（会话名为空时退回地址）
+    private var streamingDeviceName: String? {
+        guard let session = connectionManager.currentSession else { return nil }
+        return session.sessionName.isEmpty ? session.hostReal : session.sessionName
+    }
+
     var body: some View {
         RootShellView(
             selectedTab: $selectedTab,
@@ -194,6 +200,11 @@ struct MainContentView: View {
             },
             onCreateSession: {
                 sessionSheet = .create
+            },
+            isStreamCollapsed: connectionManager.isStreamCollapsed,
+            streamingDeviceName: streamingDeviceName,
+            onReturnToStream: {
+                SessionConnectionManager.shared.restoreStream()
             }
         )
         // ★ 新建 / 编辑**共用这一个** sheet。见 `SessionSheet` 上面那段说明 ——

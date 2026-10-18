@@ -18,19 +18,23 @@
 #import "ScrcpyADBClient.h"
 #import "ScrcpyVNCClient.h"
 
-// Capsule View Constants
+// Capsule View Constants（仅 VNC 的初始宽度还用到）
 static const CGFloat kCapsuleWidth = 55.0f;
-static const CGFloat kCapsuleHeight = 26.0f;
-static const CGFloat kCapsuleCornerRadius = 13.0f;
-static const CGFloat kCapsuleHandleIconWidth = 31.0f;
-static const CGFloat kCapsuleHandleIconHeight = 20.0f;
-static const CGFloat kCapsuleHandleIconX = 12.0f;
-static const CGFloat kCapsuleHandleIconY = 3.0f;
 
-// Capsule Alpha Values
-static const CGFloat kCapsuleAlphaIdle = 0.3f;
-static const CGFloat kCapsuleAlphaNormal = 0.8f;
-static const CGFloat kCapsuleAlphaExpanded = 0.8f;
+// 常驻快捷条（ADB 用，2026-10-18）
+static const CGFloat kQuickBarHeight = 40.0f;
+static const CGFloat kQuickBarButtonSize = 34.0f;
+static const CGFloat kQuickBarButtonSpacing = 2.0f;
+static const CGFloat kQuickBarPadding = 3.0f;
+static const CGFloat kQuickBarCornerRadius = 20.0f;
+static const CGFloat kQuickBarAlphaIdle = 0.45f;
+static const CGFloat kQuickBarAlphaNormal = 1.0f;
+static const NSTimeInterval kKeyRepeatInterval = 0.18;
+
+// 安卓原始键码（AKEYCODE_*，见 android/keycodes.h）
+static const int kKeycodeVolumeUp = 24;
+static const int kKeycodeVolumeDown = 25;
+static const int kKeycodePower = 26;
 
 // Menu View Constants
 static const CGFloat kMenuHeight = 60.0f;
@@ -92,8 +96,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
         [self setupGestures];
         [self startFadeTimer];
 
-        // Set initial frame size based on capsule dimensions
-        self.frame = CGRectMake(0, 0, kCapsuleWidth, kCapsuleHeight);
+        // 尺寸由 updateQuickBarLayout 按设备类型算好了，这里不再覆盖
 
         // Initialize gesture states
         self.isDragging = NO;
@@ -290,16 +293,18 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 #pragma mark - Setup Views
 
 - (void)setupViews {
-    // Capsule view (container)
-    self.capsuleView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kCapsuleWidth, kCapsuleHeight)];
+    // ★ 常驻快捷条（2026-10-18）：折叠态不再是 55×26 小胶囊，而是可拖动的迷你横条。
+    //   ADB：返回/主页/最近/音量±/电源/重启/关机/⋯ 常驻；
+    //   VNC：裁到只剩「⋯」（VNC 没有这些安卓键）。
+    self.capsuleView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kCapsuleWidth, kQuickBarHeight)];
     self.capsuleView.clipsToBounds = YES;
 
-    // Capsule background view
+    // Background view（半透明深色底）
     self.capsuleBackgroundView = [[UIView alloc] initWithFrame:self.capsuleView.bounds];
-    self.capsuleBackgroundView.layer.cornerRadius = kCapsuleCornerRadius;
+    self.capsuleBackgroundView.layer.cornerRadius = kQuickBarCornerRadius;
     self.capsuleBackgroundView.clipsToBounds = YES;
+    self.capsuleBackgroundView.userInteractionEnabled = NO;
 
-    // Gradient layer for capsule background
     CAGradientLayer *gradientLayer = [CAGradientLayer layer];
     gradientLayer.frame = self.capsuleBackgroundView.bounds;
     gradientLayer.colors = @[
@@ -310,16 +315,30 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
     gradientLayer.endPoint = CGPointMake(1, 1);
     [self.capsuleBackgroundView.layer insertSublayer:gradientLayer atIndex:0];
 
-    // Add handle icon to the capsule
-    self.capsuleHandleIcon = [[UIImageView alloc] initWithFrame:CGRectMake(kCapsuleHandleIconX, kCapsuleHandleIconY, kCapsuleHandleIconWidth, kCapsuleHandleIconHeight)];
-    self.capsuleHandleIcon.image = [UIImage systemImageNamed:kIconCapsuleHandle];
-    self.capsuleHandleIcon.tintColor = [UIColor colorWithWhite:1.0 alpha:1.0];
-    self.capsuleHandleIcon.contentMode = UIViewContentModeScaleAspectFit;
-
-    // Add subviews to capsule view
     [self.capsuleView addSubview:self.capsuleBackgroundView];
-    [self.capsuleView addSubview:self.capsuleHandleIcon];
+
+    // 常驻按键
+    self.quickBackButton = [self createQuickBarButtonWithIcon:kIconBackButton];
+    self.quickHomeButton = [self createQuickBarButtonWithIcon:kIconHomeButton];
+    self.quickSwitchButton = [self createQuickBarButtonWithIcon:kIconSwitchButton];
+    self.quickVolumeDownButton = [self createQuickBarButtonWithIcon:kIconVolumeDownButton];
+    self.quickVolumeUpButton = [self createQuickBarButtonWithIcon:kIconVolumeUpButton];
+    self.quickPowerButton = [self createQuickBarButtonWithIcon:kIconPowerButton];
+    self.quickRebootButton = [self createQuickBarButtonWithIcon:kIconRebootButton];
+    self.quickShutdownButton = [self createQuickBarButtonWithIcon:kIconShutdownButton];
+    self.quickShutdownButton.tintColor = [UIColor colorWithRed:1.0 green:0.45 blue:0.45 alpha:1.0];
+    self.quickMoreButton = [self createQuickBarButtonWithIcon:kIconQuickMoreButton];
+
+    for (UIButton *button in @[self.quickBackButton, self.quickHomeButton, self.quickSwitchButton,
+                               self.quickVolumeDownButton, self.quickVolumeUpButton,
+                               self.quickPowerButton, self.quickRebootButton,
+                               self.quickShutdownButton, self.quickMoreButton]) {
+        [self.capsuleView addSubview:button];
+    }
+
     [self addSubview:self.capsuleView];
+
+    [self updateQuickBarLayout];
 
     // Menu view (expanded state)
     UIWindow *window = [self activeWindow];
@@ -388,6 +407,10 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
     self.clipboardSyncButton = [self createButtonWithIcon:kIconClipboardSyncButton position:tempButtonFrame];
     [self.menuView addSubview:self.clipboardSyncButton];
 
+    // Collapse button（收起投屏、回 App 标签页；连接保持）
+    self.collapseButton = [self createButtonWithIcon:kIconCollapseButton position:tempButtonFrame];
+    [self.menuView addSubview:self.collapseButton];
+
     // Disconnect button
     self.disconnectButton = [self createButtonWithIcon:kIconDisconnectButton position:tempButtonFrame];
     [self.menuView addSubview:self.disconnectButton];
@@ -412,22 +435,57 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
     return button;
 }
 
+// 常驻快捷条上的小按钮：34×34，图标 15pt，触摸事件与展开菜单共用同一套 handler
+- (UIButton *)createQuickBarButtonWithIcon:(NSString *)iconName {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImageConfiguration *configuration =
+        [UIImageSymbolConfiguration configurationWithPointSize:15
+                                                        weight:UIImageSymbolWeightSemibold];
+    UIImage *icon = [UIImage systemImageNamed:iconName withConfiguration:configuration];
+    [button setImage:icon forState:UIControlStateNormal];
+    button.tintColor = [UIColor colorWithWhite:1.0 alpha:0.95];
+    button.exclusiveTouch = YES;
+    button.accessibilityIdentifier = iconName;
+
+    [button addTarget:self action:@selector(buttonTouchDown:) forControlEvents:UIControlEventTouchDown];
+    [button addTarget:self action:@selector(buttonTouchUpInside:) forControlEvents:UIControlEventTouchUpInside];
+    [button addTarget:self action:@selector(buttonTouchUpOutside:) forControlEvents:UIControlEventTouchUpOutside];
+    [button addTarget:self action:@selector(buttonTouchCancel:) forControlEvents:UIControlEventTouchCancel];
+
+    return button;
+}
+
 #pragma mark - Setup Gestures
 
 - (void)setupGestures {
     UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
     tapGesture.cancelsTouchesInView = YES;
     tapGesture.delaysTouchesEnded = YES;
+    tapGesture.delegate = self;
     [self.capsuleView addGestureRecognizer:tapGesture];
 
     UIPanGestureRecognizer *panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
     panGesture.cancelsTouchesInView = YES;
     panGesture.delaysTouchesEnded = YES;
+    panGesture.delegate = self;
     [self.capsuleView addGestureRecognizer:panGesture];
 
     UITapGestureRecognizer *dismissTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDismissTap:)];
     dismissTapGesture.cancelsTouchesInView = YES;
     [[self activeWindow] addGestureRecognizer:dismissTapGesture];
+}
+
+/// 拖动/点击手势只吃空白区域 —— 点在快捷条按钮上时交还给 UIControl，
+/// 否则拖动会把按钮点击吞掉（用户会感觉「按了没反应」）。
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    UIView *view = touch.view;
+    while (view) {
+        if ([view isKindOfClass:[UIControl class]]) {
+            return NO;
+        }
+        view = view.superview;
+    }
+    return YES;
 }
 
 - (void)handleTap:(UITapGestureRecognizer *)gesture {
@@ -446,7 +504,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
-    self.capsuleBackgroundView.alpha = kCapsuleAlphaNormal;
+    self.capsuleView.alpha = kQuickBarAlphaNormal;
 
     UIView *referenceView = self.superview;
     if (!referenceView) {
@@ -490,7 +548,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (!self.isExpanded) {
                 [UIView animateWithDuration:0.15 animations:^{
-                    self.capsuleBackgroundView.alpha = kCapsuleAlphaIdle;
+                    self.capsuleView.alpha = kQuickBarAlphaIdle;
                 }];
             }
         });
@@ -504,7 +562,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
         [UIView animateWithDuration:kAnimationDuration animations:^{
             self.menuView.alpha = 0;
             self.menuView.transform = CGAffineTransformMakeScale(0.5, 0.5);
-            self.capsuleBackgroundView.alpha = kCapsuleAlphaIdle;
+            self.capsuleView.alpha = kQuickBarAlphaIdle;
         } completion:^(BOOL finished) {
             self.menuView.hidden = YES;
             self.menuView.transform = CGAffineTransformIdentity;
@@ -541,7 +599,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
                          animations:^{
             self.menuView.alpha = 1.0;
             self.menuView.transform = CGAffineTransformIdentity;
-            self.capsuleBackgroundView.alpha = kCapsuleAlphaExpanded;
+            self.capsuleView.alpha = kQuickBarAlphaNormal;
         } completion:nil];
     }
 
@@ -639,7 +697,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 - (void)fadeCapsule {
     if (!self.isExpanded) {
         [UIView animateWithDuration:kAnimationDuration animations:^{
-            self.capsuleBackgroundView.alpha = kCapsuleAlphaIdle;
+            self.capsuleView.alpha = kQuickBarAlphaIdle;
         }];
     }
 }
@@ -724,7 +782,11 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
     }
 
     if (CGRectContainsPoint(self.capsuleView.frame, point)) {
-        return self.capsuleView;
+        // ★ 必须把命中继续下发给 capsuleView 的子视图（快捷条按钮），
+        //   直接 return capsuleView 会让按钮永远收不到触摸。
+        CGPoint localPoint = [self convertPoint:point toView:self.capsuleView];
+        UIView *hit = [self.capsuleView hitTest:localPoint withEvent:event];
+        return hit ?: self.capsuleView;
     }
 
     if (self.isExpanded && !self.menuView.hidden && self.menuView.superview) {
@@ -762,6 +824,11 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 
 #pragma mark - Window Helper
 
+/// 最近一次确实找到的 SDL 投屏窗口。
+/// ★ 投屏窗口被 hidden 后 SDL_GetMouseFocus 可能拿不到它，恢复/重排时靠它兜底，
+///   否则会退到 keyWindow（那是 SwiftUI 主窗口）。
+static __weak UIWindow *gLastSDLWindow = nil;
+
 - (UIWindow *)activeWindow {
     // SDL3 replaced SDL_GetWindowWMInfo with the per-window properties bag.
     SDL_Window *window = SDL_GetMouseFocus();
@@ -770,8 +837,12 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
         UIWindow *uiWindow = (__bridge UIWindow *)
             SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
         if (uiWindow) {
+            gLastSDLWindow = uiWindow;
             return uiWindow;
         }
+    }
+    if (gLastSDLWindow) {
+        return gLastSDLWindow;
     }
     return [UIApplication sharedApplication].keyWindow;
 }
@@ -800,7 +871,8 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
     self.maskView = [[ScrcpyMenuMaskView alloc] initWithFrame:window.bounds];
     self.maskView.delegate = self;
 
-    self.capsuleBackgroundView.alpha = kCapsuleAlphaIdle;
+    self.capsuleBackgroundView.alpha = 1.0;
+    self.capsuleView.alpha = kQuickBarAlphaIdle;
 
     [window addSubview:self];
 }
@@ -811,10 +883,93 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 
     LOG_POSITION(@"updateLayout called");
 
+    [self updateQuickBarLayout];
     [self updatePositionFromRatio];
 
     if (self.isExpanded) {
         [self updateMenuPosition];
+    }
+}
+
+#pragma mark - Quick Bar
+
+/// 当前可见的常驻快捷键（按显示顺序）
+- (NSArray<UIButton *> *)visibleQuickButtons {
+    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    NSArray<UIButton *> *all = @[self.quickBackButton, self.quickHomeButton, self.quickSwitchButton,
+                                 self.quickVolumeDownButton, self.quickVolumeUpButton,
+                                 self.quickPowerButton, self.quickRebootButton,
+                                 self.quickShutdownButton, self.quickMoreButton];
+    for (UIButton *button in all) {
+        if (button && !button.hidden) {
+            [buttons addObject:button];
+        }
+    }
+    return buttons;
+}
+
+/// 按可见按钮重排快捷条尺寸与按钮位置（宽度变化时整体重算）
+- (void)updateQuickBarLayout {
+    if (!self.capsuleView || !self.capsuleBackgroundView) return;
+
+    NSArray<UIButton *> *buttons = [self visibleQuickButtons];
+    NSInteger count = (NSInteger)buttons.count;
+    CGFloat width = kQuickBarPadding * 2 + count * kQuickBarButtonSize
+                  + (count > 1 ? (count - 1) * kQuickBarButtonSpacing : 0);
+    width = MAX(width, 40.0f);
+    CGFloat height = kQuickBarHeight;
+
+    self.capsuleView.frame = CGRectMake(0, 0, width, height);
+    self.capsuleBackgroundView.frame = self.capsuleView.bounds;
+    self.capsuleBackgroundView.layer.cornerRadius = MIN(kQuickBarCornerRadius, height / 2.0);
+
+    for (CALayer *layer in self.capsuleBackgroundView.layer.sublayers) {
+        if ([layer isKindOfClass:[CAGradientLayer class]]) {
+            layer.frame = self.capsuleBackgroundView.bounds;
+            break;
+        }
+    }
+
+    CGFloat x = kQuickBarPadding;
+    for (UIButton *button in buttons) {
+        button.frame = CGRectMake(x, (height - kQuickBarButtonSize) / 2.0,
+                                  kQuickBarButtonSize, kQuickBarButtonSize);
+        x += kQuickBarButtonSize + kQuickBarButtonSpacing;
+    }
+
+    self.frame = CGRectMake(self.frame.origin.x, self.frame.origin.y, width, height);
+}
+
+- (void)restoreQuickBarAlpha {
+    self.capsuleView.alpha = kQuickBarAlphaNormal;
+    [self startFadeTimer];
+}
+
+#pragma mark - Key Repeat（音量长按连发）
+
+- (void)startKeyRepeat:(int)keycode {
+    [self stopKeyRepeat];
+    self.repeatKeycode = keycode;
+    ScrcpyInjectKeycodeRaw(keycode);
+
+    self.keyRepeatTimer = [NSTimer timerWithTimeInterval:kKeyRepeatInterval
+                                                  target:self
+                                                selector:@selector(fireRepeatKey)
+                                                userInfo:nil
+                                                 repeats:YES];
+    // 按住按钮时 runloop 处于 tracking 模式，默认模式的 timer 不会走
+    [[NSRunLoop mainRunLoop] addTimer:self.keyRepeatTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)stopKeyRepeat {
+    [self.keyRepeatTimer invalidate];
+    self.keyRepeatTimer = nil;
+    self.repeatKeycode = 0;
+}
+
+- (void)fireRepeatKey {
+    if (self.repeatKeycode != 0) {
+        ScrcpyInjectKeycodeRaw(self.repeatKeycode);
     }
 }
 
@@ -828,6 +983,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
     if (!self.keyboardButton.hidden) count++;
     if (!self.actionsButton.hidden) count++;
     if (!self.clipboardSyncButton.hidden) count++;
+    if (!self.collapseButton.hidden) count++;
     if (!self.disconnectButton.hidden) count++;
     return count;
 }
@@ -845,20 +1001,34 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 - (void)configureForDeviceType:(ScrcpyDeviceType)deviceType {
     self.currentDeviceType = deviceType;
 
+    // ★ 常驻快捷条：安卓专用键只在 ADB 会话显示；「⋯」永远在
+    BOOL isADB = (deviceType == ScrcpyDeviceTypeADB);
+    self.quickBackButton.hidden = !isADB;
+    self.quickHomeButton.hidden = !isADB;
+    self.quickSwitchButton.hidden = !isADB;
+    self.quickVolumeDownButton.hidden = !isADB;
+    self.quickVolumeUpButton.hidden = !isADB;
+    self.quickPowerButton.hidden = !isADB;
+    self.quickRebootButton.hidden = !isADB;
+    self.quickShutdownButton.hidden = !isADB;
+    self.quickMoreButton.hidden = NO;
+
     if (deviceType == ScrcpyDeviceTypeADB) {
-        self.backButton.hidden = NO;
-        self.homeButton.hidden = NO;
-        self.switchButton.hidden = NO;
+        // 返回/主页/最近已常驻在快捷条上，展开菜单里不再重复
+        self.backButton.hidden = YES;
+        self.homeButton.hidden = YES;
+        self.switchButton.hidden = YES;
         self.keyboardButton.hidden = NO;
         self.actionsButton.hidden = NO;
         self.clipboardSyncButton.hidden = YES;
+        self.collapseButton.hidden = NO;
         self.disconnectButton.hidden = NO;
 
         [self removePinchGesture];
         [self removeDragGesture];
         [self removeTapGesture];
 
-        LOG_POSITION(@"Configured menu for ADB device - all buttons visible");
+        LOG_POSITION(@"Configured menu for ADB device - quick bar enabled");
     } else if (deviceType == ScrcpyDeviceTypeVNC) {
         self.backButton.hidden = YES;
         self.homeButton.hidden = YES;
@@ -866,6 +1036,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
         self.keyboardButton.hidden = NO;
         self.actionsButton.hidden = NO;
         self.clipboardSyncButton.hidden = NO;
+        self.collapseButton.hidden = NO;
         self.disconnectButton.hidden = NO;
 
         LOG_POSITION(@"🐆 [ScrcpyMenuView] Scheduling VNC gestures setup with 0.3s delay");
@@ -878,10 +1049,15 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
             LOG_POSITION(@"🐆 [ScrcpyMenuView] VNC gestures setup completed");
         });
 
-        LOG_POSITION(@"Configured menu for VNC device - limited buttons visible and pinch gesture enabled");
+        LOG_POSITION(@"Configured menu for VNC device - quick bar collapsed to ellipsis");
     }
 
+    [self updateQuickBarLayout];
     [self updateButtonLayout];
+
+    if (self.superview) {
+        [self updateLayout];
+    }
 }
 
 - (NSArray<UIButton *> *)getVisibleButtons {
@@ -893,6 +1069,7 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
     if (!self.keyboardButton.hidden) [visibleButtons addObject:self.keyboardButton];
     if (!self.actionsButton.hidden) [visibleButtons addObject:self.actionsButton];
     if (!self.clipboardSyncButton.hidden) [visibleButtons addObject:self.clipboardSyncButton];
+    if (!self.collapseButton.hidden) [visibleButtons addObject:self.collapseButton];
     if (!self.disconnectButton.hidden) [visibleButtons addObject:self.disconnectButton];
 
     return [visibleButtons copy];
@@ -1049,20 +1226,31 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
 
 - (void)buttonTouchDown:(UIButton *)sender {
     [self animateButton:sender pressed:YES];
+    [self restoreQuickBarAlpha];
+
+    NSString *buttonType = sender.accessibilityIdentifier;
+    if ([buttonType isEqualToString:kIconVolumeDownButton]) {
+        [self startKeyRepeat:kKeycodeVolumeDown];
+    } else if ([buttonType isEqualToString:kIconVolumeUpButton]) {
+        [self startKeyRepeat:kKeycodeVolumeUp];
+    }
 }
 
 - (void)buttonTouchUpInside:(UIButton *)sender {
     [self animateButton:sender pressed:NO];
+    [self stopKeyRepeat];
     NSString *buttonType = sender.accessibilityIdentifier;
     [self handleButtonAction:buttonType];
 }
 
 - (void)buttonTouchUpOutside:(UIButton *)sender {
     [self animateButton:sender pressed:NO];
+    [self stopKeyRepeat];
 }
 
 - (void)buttonTouchCancel:(UIButton *)sender {
     [self animateButton:sender pressed:NO];
+    [self stopKeyRepeat];
 }
 
 - (void)animateButton:(UIButton *)button pressed:(BOOL)pressed {
@@ -1087,6 +1275,29 @@ static const CGFloat kDynamicIslandWidth = 100.0f;
         [[NSNotificationCenter defaultCenter] postNotificationName:kNotificationVNCSyncClipboardRequest object:nil];
     } else if ([buttonType isEqualToString:kIconDisconnectButton]) {
         [self disconnectButtonTapped:nil];
+    } else if ([buttonType isEqualToString:kIconQuickMoreButton]) {
+        [self toggleMenuExpansion];
+    } else if ([buttonType isEqualToString:kIconPowerButton]) {
+        SDL_StopTextInput(SDL_GetKeyboardFocus());
+        ScrcpyInjectKeycodeRaw(kKeycodePower);
+    } else if ([buttonType isEqualToString:kIconRebootButton]) {
+        SDL_StopTextInput(SDL_GetKeyboardFocus());
+        if ([self.delegate respondsToSelector:@selector(didTapRebootButton)]) {
+            [self.delegate didTapRebootButton];
+        }
+    } else if ([buttonType isEqualToString:kIconShutdownButton]) {
+        SDL_StopTextInput(SDL_GetKeyboardFocus());
+        if ([self.delegate respondsToSelector:@selector(didTapShutdownButton)]) {
+            [self.delegate didTapShutdownButton];
+        }
+    } else if ([buttonType isEqualToString:kIconCollapseButton]) {
+        SDL_StopTextInput(SDL_GetKeyboardFocus());
+        if (self.isExpanded) {
+            [self toggleMenuExpansion];
+        }
+        if ([self.delegate respondsToSelector:@selector(didTapCollapseButton)]) {
+            [self.delegate didTapCollapseButton];
+        }
     }
 }
 

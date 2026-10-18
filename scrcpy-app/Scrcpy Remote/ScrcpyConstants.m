@@ -19,6 +19,15 @@ NSString * const kIconActionsButton = @"ellipsis.circle";
 NSString * const kIconDisconnectButton = @"xmark.circle";
 NSString * const kIconClipboardSyncButton = @"square.and.arrow.up.on.square";
 
+// 投屏常驻快捷条（2026-10-18）
+NSString * const kIconVolumeDownButton = @"speaker.minus";
+NSString * const kIconVolumeUpButton = @"speaker.plus";
+NSString * const kIconPowerButton = @"power";
+NSString * const kIconRebootButton = @"arrow.clockwise.circle";
+NSString * const kIconShutdownButton = @"power.circle";
+NSString * const kIconCollapseButton = @"rectangle.compress.vertical";
+NSString * const kIconQuickMoreButton = @"ellipsis";
+
 // UserDefaults Keys
 NSString * const kUserDefaultsPositionRatioX = @"ScrcpyMenuPositionRatioX";
 NSString * const kUserDefaultsPositionRatioY = @"ScrcpyMenuPositionRatioY";
@@ -34,6 +43,11 @@ NSString * const kNotificationVNCSyncClipboardRequest = @"ScrcpyVNCSyncClipboard
 NSString * const kNotificationVNCClearCandidateModifiers = @"ScrcpyVNCClearCandidateModifiersNotification";
 NSString * const kNotificationVNCModifierStateUpdated = @"ScrcpyVNCModifierStateUpdatedNotification";
 NSString * const kNotificationVNCNextKeyAlreadyCombined = @"ScrcpyVNCNextKeyAlreadyCombinedNotification";
+
+// 投屏窗口收起 / 恢复（2026-10-18）
+NSString * const kNotificationRestoreStreamRequest = @"ScrcpyRestoreStreamRequestNotification";
+NSString * const kNotificationDevicePowerCommand = @"ScrcpyDevicePowerCommandNotification";
+NSString * const kNotificationDevicePowerResult = @"ScrcpyDevicePowerResultNotification";
 
 // Device Types
 NSString * const kDeviceTypeVNC = @"vnc";
@@ -73,6 +87,11 @@ NSString * const kKeyIsEmpty = @"isEmpty";
 NSString * const kKeyKeyCode = @"keyCode";
 NSString * const kKeyText = @"text";
 NSString * const kKeyModifiers = @"modifiers";
+
+// 电源命令 Keys
+NSString * const kKeyPowerCommand = @"command";
+NSString * const kKeyPowerOK = @"ok";
+NSString * const kKeyPowerMessage = @"message";
 
 // Button Type Names
 NSString * const kButtonTypeBack = @"back";

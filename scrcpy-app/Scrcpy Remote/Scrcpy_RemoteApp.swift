@@ -29,6 +29,9 @@ struct Scrcpy_RemoteApp: App {
         // category is .ambient, which iOS immediately suspends in
         // background even with UIBackgroundModes=audio.
         BackgroundKeepAliveManager.shared.setup()
+
+        // 投屏快捷条「重启 / 关机」的执行端（监听 ObjC 侧确认后的通知）
+        _ = MirrorPowerCommand.shared
     }
 
     var body: some Scene {

@@ -35,6 +35,11 @@ struct RootShellView: View {
     var onDuplicateSession: (ScrcpySession) -> Void = { _ in }
     var onCreateSession: () -> Void = {}
 
+    /// 投屏已收起（画面隐藏、连接保持）→ 各标签页顶部显示「回到画面」横幅
+    var isStreamCollapsed: Bool = false
+    var streamingDeviceName: String? = nil
+    var onReturnToStream: () -> Void = {}
+
     private let tabs: [ShellTab] = [
         ShellTab(id: 0, icon: "dot.radiowaves.left.and.right", title: "Devices"),
         ShellTab(id: 1, icon: "terminal.fill", title: "Console"),
@@ -73,6 +78,12 @@ struct RootShellView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // 投屏收起后，三个标签页共用同一条「回到画面」细横幅
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if isStreamCollapsed, let name = streamingDeviceName {
+                StreamBanner(name: name, action: onReturnToStream)
+            }
+        }
         // 浮动胶囊浮在内容之上，同时把内容的安全区往上顶，
         // 免得列表最后一行被它盖住。
         // 注意：VRLink 在工具子页里也照样显示这条 —— 所以这里不区分层级。
@@ -85,5 +96,36 @@ struct RootShellView: View {
                 .padding(.horizontal, 24)
         }
         .background(Theme.background.ignoresSafeArea())
+    }
+}
+
+// MARK: - 「正在投屏 · 回到画面」横幅
+
+private struct StreamBanner: View {
+    let name: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "play.rectangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("正在投屏 \(name) · 点此回到画面")
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .opacity(0.85)
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, Theme.pagePadding)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity)
+            .background(Theme.accent)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("回到投屏画面")
     }
 }

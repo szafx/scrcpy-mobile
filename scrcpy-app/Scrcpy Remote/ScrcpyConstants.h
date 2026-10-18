@@ -21,6 +21,15 @@ extern NSString * const kIconActionsButton;
 extern NSString * const kIconDisconnectButton;
 extern NSString * const kIconClipboardSyncButton;
 
+// 投屏常驻快捷条（2026-10-18）
+extern NSString * const kIconVolumeDownButton;
+extern NSString * const kIconVolumeUpButton;
+extern NSString * const kIconPowerButton;
+extern NSString * const kIconRebootButton;
+extern NSString * const kIconShutdownButton;
+extern NSString * const kIconCollapseButton;
+extern NSString * const kIconQuickMoreButton;
+
 // UserDefaults Keys
 extern NSString * const kUserDefaultsPositionRatioX;
 extern NSString * const kUserDefaultsPositionRatioY;
@@ -41,6 +50,14 @@ extern NSString * const kNotificationVNCClearCandidateModifiers;
 extern NSString * const kNotificationVNCModifierStateUpdated;
 /// 通知：下一次按键已经在 Toolbar 侧完成组合（UI -> VNC），VNC 不再进行修饰键增强（一次性）
 extern NSString * const kNotificationVNCNextKeyAlreadyCombined;
+
+// 投屏窗口收起 / 恢复（2026-10-18）
+/// Swift -> ObjC：请求恢复投屏窗口（顶部横幅点击）
+extern NSString * const kNotificationRestoreStreamRequest;
+/// ObjC -> Swift：请求对远端设备执行电源命令。userInfo[kKeyPowerCommand]
+extern NSString * const kNotificationDevicePowerCommand;
+/// Swift -> ObjC：电源命令执行结果。userInfo[kKeyPowerOK] / userInfo[kKeyPowerMessage]
+extern NSString * const kNotificationDevicePowerResult;
 
 // Device Types
 extern NSString * const kDeviceTypeVNC;
@@ -81,6 +98,12 @@ extern NSString * const kKeyIsEmpty;
 extern NSString * const kKeyKeyCode;
 extern NSString * const kKeyText;
 extern NSString * const kKeyModifiers;
+
+// 电源命令 Keys
+/// @"reboot" | @"reboot -p"
+extern NSString * const kKeyPowerCommand;
+extern NSString * const kKeyPowerOK;
+extern NSString * const kKeyPowerMessage;
 
 // Button Type Names
 extern NSString * const kButtonTypeBack;

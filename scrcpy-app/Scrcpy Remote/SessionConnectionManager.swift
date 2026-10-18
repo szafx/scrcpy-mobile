@@ -111,6 +111,10 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
     
     /// 当前连接的开始时间
     @Published var connectionStartTime: Date?
+
+    /// 投屏窗口是否已收起：画面隐藏、回到标签页，但连接/解码全部保持。
+    /// 由 SDL 投屏菜单（ObjC）通过 setStreamCollapsed: 驱动。
+    @Published private(set) var isStreamCollapsed: Bool = false
     
     // MARK: - Private Properties
     
@@ -853,7 +857,10 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         errorCallback: @escaping ConnectionErrorCallback
     ) {
         print("🚀 [SessionConnectionManager] Starting connection to session: \(session.sessionName)")
-        
+
+        // 新连接一定从「投屏可见」开始（防上一次的收起状态遗留成一条假横幅）
+        isStreamCollapsed = false
+
         // 保存将要连接的会话信息
         connectingSession = session
         
@@ -1325,6 +1332,7 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         connectionStatus = ScrcpyStatusDisconnected
         isConnecting = false
         connectionStartTime = nil
+        isStreamCollapsed = false
 
         // Stop the silent-audio keep-alive engine if it was running —
         // there is nothing left to keep alive once the session is gone.
@@ -1460,6 +1468,37 @@ typealias ActionConfirmationCallback = (ScrcpyAction, @escaping () -> Void) -> V
         }
 
         // ★ 这里**故意不调 clearCurrentSession()** —— 会话留着，界面就还在。
+    }
+
+    // MARK: - 投屏窗口收起 / 恢复（2026-10-18）
+
+    /// ObjC 侧（SDL 投屏菜单）调用：投屏窗口已收起 / 已恢复。
+    @objc func setStreamCollapsed(_ collapsed: Bool) {
+        DispatchQueue.main.async {
+            self.applyStreamCollapsed(collapsed)
+        }
+    }
+
+    private func applyStreamCollapsed(_ collapsed: Bool) {
+        guard isStreamCollapsed != collapsed else { return }
+        isStreamCollapsed = collapsed
+        // 延迟气泡是独立浮层窗口（normal+1），收起投屏时必须一起收掉
+        Task { @MainActor in
+            if collapsed {
+                LatencyBadgeWindow.shared.hide()
+            } else if self.currentSession != nil {
+                LatencyBadgeWindow.shared.show()
+            }
+        }
+    }
+
+    /// 顶部横幅点击：让 ObjC 把 SDL 投屏窗口放回前台（连接保持）
+    @objc func restoreStream() {
+        guard isStreamCollapsed else { return }
+        NotificationCenter.default.post(
+            name: Notification.Name("ScrcpyRestoreStreamRequestNotification"),
+            object: nil
+        )
     }
 
     func disconnectCurrent() {
