@@ -351,7 +351,11 @@ struct LanDiscovery {
             print("[LanDiscovery] fd \(fd) 超出 fd_set 容量，跳过（不该发生，发生了说明有 fd 泄漏）")
             return
         }
-        let mask = Int32(1 << (fd % 32))
+        // ★ 必须 truncating：fd % 32 == 31 时 `1 << 31` 是 2^31，Int32(...) 越界会
+        //   trap（Swift 运行时断点 → App 闪退）。C 的 FD_SET 本来就把这一位写成
+        //   0x80000000（Int32 负数），位模式完全一致。
+        //   实测：build 125 改成 253 并发扫描后，fd 很容易落到 31/63/95… → 每次扫描都可能崩。
+        let mask = Int32(truncatingIfNeeded: 1 << (fd % 32))
         withUnsafeMutablePointer(to: &set.fds_bits) { ptr in
             ptr.withMemoryRebound(to: Int32.self, capacity: 32) { raw in
                 raw[offset] |= mask
