@@ -33,16 +33,20 @@ struct DevicesView: View {
 
     @EnvironmentObject var appSettings: AppSettings
 
-    /// 设置 sheet 里显示哪一页：quickConnect = 点选直连的「连接设置」（临时、不落盘）；
-    /// createSession = 新建会话。nil 时 sheet 不显示。
-    /// ★ 扫到的列表已并入首页，sheet 只用来承载设置页本身。
+    /// 点设备弹出的「连接设置」sheet 载荷。nil 时 sheet 不显示。
+    /// ★ 必须走 `.sheet(item:)`：用 `.sheet(isPresented:)` + 另一个 @State 决定内容时，
+    ///   冷启动后首次弹出会拿到旧值（nil）→ 空白页，退回再点才正常（2026-10-18 用户实测）。
     /// quickConnect 第二个值 = 这台设备**亮着灯的连接方式**（+自动），设置页只列这些。
-    private enum ScanSheetMode {
+    private enum ScanSheetMode: Identifiable {
         case quickConnect(ScrcpySessionModel, Set<ConnectionMode>)
-        case createSession
+
+        var id: UUID {
+            switch self {
+            case .quickConnect(let model, _): return model.id
+            }
+        }
     }
 
-    @State private var isScanSheetShown = false
     @State private var scanSheetMode: ScanSheetMode? = nil
     @State private var sessionPendingDeletion: ScrcpySession?
     @State private var showDeleteConfirm = false
@@ -87,23 +91,14 @@ struct DevicesView: View {
                 await discovery.refreshLightweight()
             }
         }
-        .sheet(isPresented: $isScanSheetShown, onDismiss: {
-            scanSheetMode = nil
-        }) {
-            switch scanSheetMode {
+        .sheet(item: $scanSheetMode) { mode in
+            switch mode {
             case .quickConnect(let model, let allowed):
                 SessionCreateView(sessionModel: model, onConnect: { m in
-                    isScanSheetShown = false
+                    scanSheetMode = nil
                     onConnectSession(ScrcpySession(sessionModel: m))
                 }, allowedModes: allowed)
                 .environmentObject(appSettings)
-
-            case .createSession:
-                SessionCreateView()
-                    .environmentObject(appSettings)
-
-            case nil:
-                EmptyView()
             }
         }
         .alert(isPresented: $showDeleteConfirm) {
@@ -422,9 +417,8 @@ struct DevicesView: View {
         // 发现到的中转端口直接预填 —— 进设置页选「家里 IPv6 中转」就不用再手敲
         if let rp = dev.relayPort { model.frpRemotePort = String(rp) }
         model.adbOptions.turnScreenOff = quickTurnScreenOff
-        // ★ 就地弹设置页（不关不开 —— 同 tick 二次 present 会被 UIKit 吞，见交接-2026-10-09）
+        // ★ 就地弹设置页（不先关再开 —— 同 tick 二次 present 会被 UIKit 吞，见交接-2026-10-09）
         scanSheetMode = .quickConnect(model, allowed)
-        isScanSheetShown = true
     }
 }
 
