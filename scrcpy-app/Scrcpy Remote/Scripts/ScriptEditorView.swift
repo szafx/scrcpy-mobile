@@ -56,7 +56,7 @@ struct ScriptEditorView: View {
             Section {
                 ForEach($script.steps) { $step in
                     NavigationLink(destination: ScriptStepEditorView(step: $step)) {
-                        ScriptStepRow(step: step)
+                        ScriptStepRow(step: $step.wrappedValue)
                     }
                 }
                 .onDelete { offsets in

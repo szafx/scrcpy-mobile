@@ -848,10 +848,14 @@ static char orientationLockEnabledKey;
         return;
     }
 
-    sdlWindow.hidden = YES;
+    // ★ 不能 hidden —— 实测 hidden 会把 SDL 的渲染/触摸管线停掉：再回来黑屏、
+    //   底部按键全部没反应（用户 2026-10-18 实测）。改成 alpha=0 + 关交互：
+    //   窗口仍然"可见"，SDL 继续解码渲染，控制通道也不会断。
+    sdlWindow.alpha = 0.0;
+    sdlWindow.userInteractionEnabled = NO;
     [appWindow makeKeyAndVisible];
     [[SessionConnectionManager shared] setStreamCollapsed:YES];
-    NSLog(@"🪟 [Collapse] 投屏已收起（连接保持）");
+    NSLog(@"🪟 [Collapse] 投屏已收起（alpha 隐藏，连接/渲染保持）");
 }
 
 /// 顶部横幅点击 → 恢复 SDL 窗口
@@ -864,6 +868,8 @@ static char orientationLockEnabledKey;
     gSDLWindow = sdlWindow;
 
     sdlWindow.hidden = NO;
+    sdlWindow.alpha = 1.0;
+    sdlWindow.userInteractionEnabled = YES;
     [sdlWindow makeKeyWindow];
     [[SessionConnectionManager shared] setStreamCollapsed:NO];
 
