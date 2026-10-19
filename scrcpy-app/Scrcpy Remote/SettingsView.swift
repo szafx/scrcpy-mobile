@@ -2243,6 +2243,12 @@ struct ADBPairingView: View {
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .textContentType(.URL)
+
+                if let (host, _) = parseHostPort(adbPairHostPort), isTailnetHost(host) {
+                    Text("检测到 Tailnet 地址：将经内置 Tailscale 转发后配对（需要手机上的 FrpcApp relay 在线，端口一般是 5557）")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
                 
                 TextField("Pairing Code (6 digits)", text: $adbPairCode)
                     .keyboardType(.numberPad)
@@ -2292,37 +2298,129 @@ struct ADBPairingView: View {
             pairResultIsError = true
             return
         }
-        
+
         isPairing = true
         pairResultMessage = ""
         pairResultIsError = false
 
-        // Call ADBClient to perform pairing
-        let adbClient = ADBClient.shared()
         let hostPort = adbPairHostPort.trimmingCharacters(in: .whitespacesAndNewlines)
         let code = adbPairCode.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        adbClient.executeADBCommandAsync(["pair", hostPort, code]) { output, returnCode in
+        guard let (host, port) = parseHostPort(hostPort) else {
+            isPairing = false
+            pairResultMessage = "Host:Port 格式不对（例：192.168.1.5:37123 或 100.x.x.x:5557）"
+            pairResultIsError = true
+            return
+        }
+
+        // ★ Tailnet 地址（100.x / *.ts.net）必须经内置 tsnet 转发：
+        //   Pair 走的是 libadb 直连，App 进程本身没有 100.x 的路由。
+        if isTailnetHost(host) {
+            pairViaTailscale(host: host, port: port, code: code)
+        } else {
+            runPair(hostPort: hostPort, code: code)
+        }
+    }
+
+    /// 普通 pairing（局域网 IP / 公网地址）
+    private func runPair(hostPort: String, code: String) {
+        ADBClient.shared().executeADBCommandAsync(["pair", hostPort, code]) { output, returnCode in
             DispatchQueue.main.async {
                 isPairing = false
 
                 if returnCode == 0, let output = output, output.lowercased().contains("success") {
                     pairResultMessage = "Pairing succeeded! You can now connect via ADB wireless."
                     pairResultIsError = false
-
-                    // Add to pairing history
                     appSettings.addPairingHistory(hostPort)
-
-                    // Clear input fields
                     adbPairHostPort = ""
                     adbPairCode = ""
                 } else {
-                    let errorMessage = output ?? "Unknown error"
-                    pairResultMessage = "Pairing failed: \(errorMessage)"
+                    pairResultMessage = "Pairing failed: \(output ?? "Unknown error")"
                     pairResultIsError = true
                 }
             }
         }
+    }
+
+    /// 经内置 Tailscale（tsnet）配对：100.x:5557 -> 本机转发端口 -> adb pair
+    private func pairViaTailscale(host: String, port: UInt16, code: String) {
+        pairResultMessage = "正在连接内置 Tailscale…"
+
+        Task {
+            let manager = TailscaleManager.shared
+
+            guard manager.isConfigurationValid() else {
+                await MainActor.run { failPair("Tailscale 配置无效，请到 设置 → Tailscale 检查") }
+                return
+            }
+            _ = manager.ensureConnected()
+
+            var connected = false
+            for _ in 0..<40 {
+                if manager.getConnectionStatus() == 1 { connected = true; break }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            guard connected else {
+                await MainActor.run { failPair("Tailscale 未连上：\(manager.getLastError() ?? "超时")") }
+                return
+            }
+
+            var selectedPort: Int?
+            for candidate in 21000...21099 {
+                if manager.startForward(remoteAddr: host, remotePort: Int(port), localPort: candidate) {
+                    selectedPort = candidate
+                    break
+                }
+            }
+            guard let local = selectedPort else {
+                await MainActor.run { failPair("端口转发失败：\(manager.getLastError() ?? "无可用本地端口")") }
+                return
+            }
+
+            await MainActor.run {
+                pairResultMessage = "经 Tailscale 转发到 127.0.0.1:\(local)，正在配对…"
+            }
+
+            let result: (output: String, code: Int32) = await withCheckedContinuation { continuation in
+                ADBClient.shared().executeADBCommandAsync(["pair", "127.0.0.1:\(local)", code]) { output, returnCode in
+                    continuation.resume(returning: (output ?? "", returnCode))
+                }
+            }
+
+            _ = manager.stopForward(remoteAddr: host, remotePort: Int(port), localPort: local)
+
+            await MainActor.run {
+                isPairing = false
+                if result.code == 0, result.output.lowercased().contains("success") {
+                    pairResultMessage = "Pairing succeeded！（经 Tailscale）"
+                    pairResultIsError = false
+                    appSettings.addPairingHistory("\(host):\(port)")
+                    adbPairHostPort = ""
+                    adbPairCode = ""
+                } else {
+                    failPair("Pairing failed: \(result.output)")
+                }
+            }
+        }
+    }
+
+    private func failPair(_ message: String) {
+        isPairing = false
+        pairResultMessage = message
+        pairResultIsError = true
+    }
+
+    private func parseHostPort(_ text: String) -> (host: String, port: UInt16)? {
+        let parts = text.split(separator: ":")
+        guard parts.count == 2, let port = UInt16(parts[1]) else { return nil }
+        return (String(parts[0]), port)
+    }
+
+    /// tailnet 地址：100.64.0.0/10（这里简判 100.）或 MagicDNS 的 *.ts.net
+    private func isTailnetHost(_ host: String) -> Bool {
+        if host.hasPrefix("100.") { return true }
+        if host.lowercased().hasSuffix(".ts.net") { return true }
+        return false
     }
     
     private func formatPairingTime(_ timestamp: Date) -> String {
