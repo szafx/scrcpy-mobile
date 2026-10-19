@@ -93,6 +93,12 @@ struct ConsoleView: View {
                         subtitle: "Visual adb scripts: tap, swipe, image match.",
                         icon: "scroll.fill",
                         kind: .push(AnyView(ScriptsListView()))),
+
+            ConsoleTool(index: 10,
+                        title: "ADB 修复",
+                        subtitle: "开启明文 5555（无线调试不持久时用）。",
+                        icon: "wrench.and.screwdriver.fill",
+                        kind: .push(AnyView(AdbMaintenanceView()))),
         ]
     }
 
