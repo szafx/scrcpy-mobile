@@ -1919,7 +1919,12 @@ struct ADBKeysManagementView: View {
                 }) {
                     HStack {
                         Image(systemName: "square.and.arrow.down")
-                        Text("Import Keys")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Import Keys")
+                            Text("选 zip / 文件夹 / 两个密钥文件都可以")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
                 .disabled(isLoading)
@@ -1964,14 +1969,15 @@ struct ADBKeysManagementView: View {
         }
         .fileImporter(
             isPresented: $showingImportPicker,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: false
+            // ★ 2026-10-27：允许选任意文件（含 zip / 文件夹 / 单文件）。
+            //   原来只允许 [.folder]，iOS 的文件夹选择器「点打开」经常毫无反应
+            //   （系统返回空 URL）。现在支持三种：文件夹、zip、多选两个密钥文件。
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
         ) { result in
             switch result {
             case .success(let urls):
-                if let url = urls.first {
-                    importKeys(from: url)
-                }
+                importKeys(from: urls)
             case .failure(let error):
                 setStatus("Import failed: \(error.localizedDescription)", isError: true)
             }
@@ -2063,6 +2069,122 @@ struct ADBKeysManagementView: View {
                     self.setStatus("ADB keys exported successfully to \(url.lastPathComponent)", isError: false)
                 } else {
                     self.setStatus("Failed to export ADB keys", isError: true)
+                }
+            }
+        }
+    }
+
+    /// 导入入口：可能是文件夹、zip、或多选的两个密钥文件（2026-10-27 重写）
+    private func importKeys(from urls: [URL]) {
+        guard let first = urls.first else {
+            setStatus("Import failed: no file selected", isError: true)
+            return
+        }
+
+        // ① 只有一个、且是文件夹 → 老路径（文件夹里直接有 adbkey / adbkey.pub）
+        let isDirectory = (try? first.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+        if urls.count == 1, isDirectory {
+            importKeys(from: first)
+            return
+        }
+
+        // ② zip：解压出两个密钥再导入
+        if urls.count == 1, first.pathExtension.lowercased() == "zip" {
+            importKeysFromZip(first)
+            return
+        }
+
+        // ③ 多选的文件：按文件名收齐 adbkey / adbkey.pub，复制到临时目录再导入
+        importKeysFromFiles(urls)
+    }
+
+    private func importKeysFromZip(_ zipURL: URL) {
+        isLoading = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let accessed = zipURL.startAccessingSecurityScopedResource()
+            defer { if accessed { zipURL.stopAccessingSecurityScopedResource() } }
+
+            let fm = FileManager.default
+            let tmpDir = fm.temporaryDirectory.appendingPathComponent("adbkey-zip-\(UUID().uuidString)")
+            try? fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmpDir) }
+
+            let extracted = ADBKeyZip.extractKeys(from: zipURL, to: tmpDir)
+            guard extracted else {
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.setStatus("zip 里没找到 adbkey 和 adbkey.pub 两个文件", isError: true)
+                }
+                return
+            }
+
+            let success = self.adbClient.importADBKeys(fromDirectory: tmpDir.path)
+            DispatchQueue.main.async {
+                self.isLoading = false
+                if success {
+                    self.setStatus("ADB keys imported successfully from \(zipURL.lastPathComponent)", isError: false)
+                    self.loadKeys()
+                } else {
+                    self.setStatus("Failed to import ADB keys from zip", isError: true)
+                }
+            }
+        }
+    }
+
+    private func importKeysFromFiles(_ urls: [URL]) {
+        isLoading = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fm = FileManager.default
+            let tmpDir = fm.temporaryDirectory.appendingPathComponent("adbkey-files-\(UUID().uuidString)")
+            try? fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: tmpDir) }
+
+            var foundPrivate = false
+            var foundPublic = false
+
+            for url in urls {
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+
+                let name = url.lastPathComponent.lowercased()
+                let targetName: String?
+                if name == "adbkey" {
+                    targetName = "adbkey"
+                    foundPrivate = true
+                } else if name == "adbkey.pub" {
+                    targetName = "adbkey.pub"
+                    foundPublic = true
+                } else {
+                    targetName = nil
+                }
+                guard let targetName else { continue }
+
+                let dest = tmpDir.appendingPathComponent(targetName)
+                try? fm.removeItem(at: dest)
+                try? fm.copyItem(at: url, to: dest)
+            }
+
+            guard foundPrivate, foundPublic else {
+                let missing = !foundPrivate && !foundPublic
+                    ? "adbkey 和 adbkey.pub"
+                    : (!foundPrivate ? "adbkey" : "adbkey.pub")
+                DispatchQueue.main.async {
+                    self.isLoading = false
+                    self.setStatus("缺少 \(missing)：请同时选中 adbkey 和 adbkey.pub 两个文件（或直接选 zip）", isError: true)
+                }
+                return
+            }
+
+            let success = self.adbClient.importADBKeys(fromDirectory: tmpDir.path)
+            DispatchQueue.main.async {
+                self.isLoading = false
+                if success {
+                    self.setStatus("ADB keys imported successfully", isError: false)
+                    self.loadKeys()
+                } else {
+                    self.setStatus("Failed to import ADB keys", isError: true)
                 }
             }
         }
