@@ -1967,19 +1967,14 @@ struct ADBKeysManagementView: View {
         .onAppear {
             loadKeys()
         }
-        .fileImporter(
-            isPresented: $showingImportPicker,
-            // ★ 2026-10-27：允许选任意文件（含 zip / 文件夹 / 单文件）。
-            //   原来只允许 [.folder]，iOS 的文件夹选择器「点打开」经常毫无反应
-            //   （系统返回空 URL）。现在支持三种：文件夹、zip、多选两个密钥文件。
-            allowedContentTypes: [.item],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
+        // ★ 2026-10-27：不再用 SwiftUI 的 .fileImporter —— 实测点「打开」后
+        //   弹窗不消失、回调也不触发。改用 UIKit 的 UIDocumentPickerViewController，
+        //   并且 asCopy:true 让系统先复制到 App 沙盒，读取时不受 security-scope 限制。
+        .sheet(isPresented: $showingImportPicker) {
+            DocumentPicker(contentTypes: [.item], allowsMultipleSelection: true) { urls in
+                showingImportPicker = false
+                guard !urls.isEmpty else { return }
                 importKeys(from: urls)
-            case .failure(let error):
-                setStatus("Import failed: \(error.localizedDescription)", isError: true)
             }
         }
         .fileExporter(
